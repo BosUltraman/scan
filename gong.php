@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V16: UI Filter, DB Force Socket.
+// GHOST v18 - V17: Grouped Scanner UI, DB CLI Bypass.
 
-define('GH_VER',      '18.0.0-v16');
+define('GH_VER',      '18.0.0-v17');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -1200,7 +1200,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V16) =============================================
+// ==== UI (TAB NAVIGATION - V17) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -1457,27 +1457,61 @@ async function startScan() {
         offset += 50;
     }
 }
+
+// GROUPING LOGIC
 function renderScan(mal) {
     if (!mal.length) { document.getElementById('scan-results').innerHTML = '<p class="dim">Clean.</p>'; return; }
-    let h = `<table><tr><th>Type & Desc</th><th>File</th><th>Aksi</th></tr>`;
-    mal.forEach(x => {
-        let enc = encodeURIComponent(x.path);
-        let badge_color = '#d9534f'; // Default merah
-        if (x.type.includes('Suspicious')) badge_color = '#f0ad4e'; // Orange
-        if (x.type.includes('Leftover')) badge_color = '#5bc0de'; // Biru
-        if (x.type.includes('Illegal')) badge_color = '#800080'; // Ungu
+    
+    let groups = {
+        'Backdoor / Malware (Merah)': [],
+        'Sampah / Leftover (Biru)': [],
+        'Suspicious / Curiga (Orange)': [],
+        'Illegal Content / Judi (Ungu)': []
+    };
 
-        h += `<tr>
-            <td><span class="badge" style="background:${badge_color}">${esc(x.type)}</span><br><span class="dim" style="font-size:11px;">${esc(x.desc)}</span></td>
-            <td>${esc(x.path)}</td>
-            <td>
-                <button onclick="viewFileScan('${enc}')" style="border-color:#0f0;color:#0f0; padding:2px 5px; font-size:11px;">View</button>
-                <button onclick="delFileScan('${enc}')" style="border-color:#f00;color:#f00; padding:2px 5px; font-size:11px;">Del</button>
-            </td>
-        </tr>`;
+    mal.forEach(x => {
+        if (x.type.includes('Suspicious')) {
+            groups['Suspicious / Curiga (Orange)'].push(x);
+        } else if (x.type.includes('Leftover') || x.type.includes('Empty Shell')) {
+            groups['Sampah / Leftover (Biru)'].push(x);
+        } else if (x.type.includes('Illegal') || x.type.includes('Judi') || x.type.includes('Porno')) {
+            groups['Illegal Content / Judi (Ungu)'].push(x);
+        } else {
+            groups['Backdoor / Malware (Merah)'].push(x);
+        }
     });
-    h += `</table>`; document.getElementById('scan-results').innerHTML = h;
+
+    let html = '';
+    for (let gName in groups) {
+        let items = groups[gName];
+        if (!items.length) continue;
+
+        let color = '#d9534f'; // Red default
+        if (gName.includes('Orange')) color = '#f0ad4e';
+        if (gName.includes('Biru')) color = '#5bc0de';
+        if (gName.includes('Ungu')) color = '#800080';
+
+        html += `<div class="box" style="border-left: 4px solid ${color}; margin-top:16px;">`;
+        html += `<h3 style="color:${color};font-size:12px;">${gName} (${items.length} File)</h3>`;
+        html += `<table><tr><th>Type & Desc</th><th>File</th><th>Aksi</th></tr>`;
+        
+        items.forEach(x => {
+            let enc = encodeURIComponent(x.path);
+            html += `<tr>
+                <td><span class="badge" style="background:${color}">${esc(x.type)}</span><br><span class="dim" style="font-size:11px;">${esc(x.desc)}</span></td>
+                <td>${esc(x.path)}</td>
+                <td>
+                    <button onclick="viewFileScan('${enc}')" style="border-color:#0f0;color:#0f0; padding:2px 5px; font-size:11px;">View</button>
+                    <button onclick="delFileScan('${enc}')" style="border-color:#f00;color:#f00; padding:2px 5px; font-size:11px;">Del</button>
+                </td>
+            </tr>`;
+        });
+        html += `</table></div>`;
+    }
+    
+    document.getElementById('scan-results').innerHTML = html;
 }
+
 function viewFileScan(enc) {
     const p = decodeURIComponent(enc);
     document.getElementById('f-path').value = p;
