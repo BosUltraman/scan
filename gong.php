@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - Heuristic v2: Large File Scanner & Obfuscation Detector.
+// GHOST v18 - Heuristic v4: Local Static AI Analyzer.
 
-define('GH_VER',      '18.0.0-v2');
+define('GH_VER',      '18.0.0-v4');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -188,15 +188,12 @@ function gh_read($path, $max = 5242880) {
 }
 
 function gh_read_chunk($path, $chunk_size = 2097152) {
-    // Baca file besar secara aman (max 20MB) potongan per 2MB
     if (!@is_file($path)) return null;
     $sz = @filesize($path);
-    if ($sz === false || $sz > 20971520) return null; // Skip >20MB
-    
+    if ($sz === false || $sz > 20971520) return null;
     $h = @fopen($path, 'rb');
     if (!$h) return null;
-    $out = '';
-    $read = 0;
+    $out = ''; $read = 0;
     while (!@feof($h) && $read < 20971520) {
         $chunk = @fread($h, $chunk_size);
         if ($chunk === false) break;
@@ -222,17 +219,39 @@ function gh_del($path) {
     $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
-// ==== SECTION 3: SCANNER (HEURISTIC V2) =====================================
-function gh_calc_entropy($data) {
-    if (!is_string($data) || $data === '') return 0;
-    $len = strlen($data);
-    $freq = array_count_values(str_split($data));
-    $ent = 0;
-    foreach ($freq as $count) {
-        $p = $count / $len;
-        $ent -= $p * log($p, 2);
+// ==== SECTION 3: STATIC AI ANALYZER (V4) ====================================
+function gh_analyze_intent($content) {
+    if (!is_string($content) || $content === '') return array('score' => 0, 'reason' => 'Empty');
+    
+    $score = 0;
+    $reasons = array();
+
+    // 1. Deteksi Eksekusi (RCE)
+    if (preg_match('/\b(eval|assert|create_function)\s*\(/i', $content)) { $score += 40; $reasons[] = "Fungsi eksekusi dinamis (eval/assert)"; }
+    if (preg_match('/\b(system|shell_exec|passthru|popen|proc_open|pcntl_exec)\s*\(/i', $content)) { $score += 40; $reasons[] = "Eksekusi perintah OS (system/exec)"; }
+    if (preg_match('/`.*?`/s', $content) && preg_match('/\$_/', $content)) { $score += 30; $reasons[] = "Eksekusi shell via backtick (`)"; }
+    if (preg_match('/\$[a-zA-Z0-9_]+\s*\([^)]*\$[a-zA-Z0-9_]*\)/i', $content)) { $score += 20; $reasons[] = "Variable Function (misal: $a($b))"; }
+
+    // 2. Deteksi Obfuscation & Encoding
+    if (preg_match('/(base64_decode|gzinflate|gzuncompress|str_rot13|hex2bin|pack)\s*\(/i', $content)) { $score += 25; $reasons[] = "Decoding (base64/gzip/hex)"; }
+    if (preg_match('/preg_replace\s*\(.*?\/e/i', $content)) { $score += 30; $reasons[] = "preg_replace e-modifier (RCE)"; }
+    if (substr_count($content, '.=') > 10) { $score += 20; $reasons[] = "Penumpukan string (String Concatenation)"; }
+
+    // 3. Deteksi Akses File Sensitif / Exfiltration
+    if (preg_match('/\b(file_get_contents|fopen|readfile|curl_exec|fsockopen)\s*\(/i', $content) && preg_match('/\$_/', $content)) { $score += 15; $reasons[] = "Input user masuk ke File/Network"; }
+    if (preg_match('/\/etc\/(passwd|shadow)|wp-config\.php|\.env|\.ssh/i', $content)) { $score += 30; $reasons[] = "Target file sensitif (passwd/wp-config)"; }
+    if (preg_match('/(chmod|chown|unlink|rmdir)\s*\(/i', $content) && preg_match('/\$_/', $content)) { $score += 15; $reasons[] = "Manipulasi file dari input user"; }
+
+    // 4. Deteksi Backdoor Auth (Implant)
+    if (preg_match('/HTTP_X_AUTH/i', $content) || (preg_match('/hex2bin\(/i', $content) && preg_match('/hash_equals/i', $content))) { 
+        $score += 50; $reasons[] = "Backdoor Auth Bypass (X-Auth/Hash)"; 
     }
-    return $ent;
+    
+    // 5. Deteksi Header / Evasion
+    if (preg_match('/User-Agent|HTTP_REFERER|HTTP_X_FORWARDED_FOR/i', $content) && preg_match('/base64|eval|system/i', $content)) { $score += 15; $reasons[] = "Evasion via Header/Cookie"; }
+
+    $final_reason = implode(', ', $reasons);
+    return array('score' => $score, 'reason' => $final_reason);
 }
 
 function gh_scan_batch($root, $offset = 0, $limit = 50) {
@@ -247,7 +266,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             $path = $current . '/' . $f;
             if (@is_dir($path) && !@is_link($path)) { $stack[] = $path; }
             elseif (@is_file($path)) {
-                if (@filesize($path) > 20 * 1024 * 1024) continue; // Max 20MB
+                if (@filesize($path) > 20 * 1024 * 1024) continue; 
                 $all_files[] = $path;
             }
         }
@@ -260,7 +279,6 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     $mal_users = array();
 
     foreach ($batch as $path) {
-        // Baca potongan
         $c = gh_read_chunk($path, 2097152);
         $size = @filesize($path);
         $filename = basename($path);
@@ -270,63 +288,62 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
         $owner = @posix_getpwuid(@fileowner($path));
         $owner_name = is_array($owner) ? $owner['name'] : 'unknown';
         
+        // --- AI STATIC ANALYSIS ---
+        $intent = gh_analyze_intent($c);
+        $score = $intent['score'];
+        $reason = $intent['reason'];
+
         // 1. Deteksi Leftover Dropper
         if (preg_match('/^\.vnt_[a-f0-9]+\.php$|^\.vnt_/i', $filename)) {
             $type = 'Leftover Dropper (Sampah)';
             $desc = 'File sisa dari exploit/backdoor yang gagal. AMAN UNTUK DIHAPUS.';
         }
-        // 2. Deteksi Implant Auth
-        elseif (is_string($c) && (preg_match('/HTTP_X_AUTH/i', $c) || (preg_match('/hex2bin\(/i', $c) && preg_match('/hash_equals/i', $c)))) {
-            $type = 'Implant Auth Bypass'; 
-            $desc = 'Script ini punya sistem login rahasia (X-Auth/Hex). Backdoor tingkat lanjut.';
+        // 2. Gunakan Hasil AI Analyzer
+        elseif ($score >= 60) {
+            $type = 'AI: High Malicious Intent';
+            $desc = "Skor $score/100. Terdeteksi: $reason";
         }
-        // 3. Deteksi Obfuscation & RCE
-        elseif (is_string($c) && (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false || preg_match('/preg_replace\s*\(.*\/e/i', $c))) { 
-            $type = 'Obfuscated RCE'; $desc = 'Menggunakan eval()/assert()/preg_replace e-modifier untuk eksekusi kode dinamis.'; 
+        elseif ($score >= 30) {
+            $type = 'AI: Suspicious Code';
+            $desc = "Skor $score/100. Terdeteksi: $reason";
+        }
+        elseif (is_string($c) && (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false)) { 
+            $type = 'Obfuscated RCE'; $desc = 'Menggunakan eval()/assert().'; 
         }
         elseif (is_string($c) && preg_match('/(shell_exec|passthru|system|popen|proc_open|pcntl_exec)\s*\(\s*\$_/i', $c)) { 
-            $type = 'Direct Webshell'; $desc = 'Mengeksekusi shell dari parameter HTTP secara langsung.'; 
+            $type = 'Direct Webshell'; $desc = 'Mengeksekusi shell dari parameter HTTP.'; 
         }
-        elseif (is_string($c) && preg_match('/(`.*?`)/s', $c) && (stripos($c, '$_') !== false)) {
-            $type = 'Backtick Exec'; $desc = 'Mengeksekusi perintah via backtick (`) dari input user.';
-        }
-        // 4. Deteksi String Splitting & Base64
-        elseif (is_string($c) && (stripos($c, 'base64_decode') !== false || stripos($c, 'gzinflate') !== false || stripos($c, 'str_rot13') !== false) && (stripos($c, 'eval') !== false || stripos($c, 'system') !== false)) {
-            $type = 'Encoded Payload'; $desc = 'Payload disembunyikan pakai base64/gzip/rot13 sebelum dieksekusi.';
-        }
-        // 5. Deteksi Hidden PHP
         elseif (!$ext && is_string($c) && stripos($c, '<?php') !== false) {
             $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi tapi berisi kode PHP.';
         }
-        // 6. Deteksi Polyglot
         elseif (in_array($ext, array('jpg','jpeg','png','gif')) && is_string($c) && stripos($c, '<?php') !== false) {
-            $type = 'Polyglot Malware'; $desc = 'Gambar yang disisipi kode PHP (Bypass upload).';
+            $type = 'Polyglot Malware'; $desc = 'Gambar disisipi kode PHP.';
         }
-        // 7. Deteksi Entropy Tinggi (File Besar & Acak)
         elseif ($size > 102400 && is_string($c) && $ext === 'php') {
-            // Ambil 100KB pertama buat cek entropy
             $sample = substr($c, 0, 102400);
-            $ent = gh_calc_entropy($sample);
-            if ($ent > 5.5) { // 5.5 adalah ambang batas normal
+            $freq = array_count_values(str_split($sample));
+            $ent = 0; $len = strlen($sample);
+            foreach ($freq as $cnt) { $p = $cnt / $len; $ent -= $p * log($p, 2); }
+            if ($ent > 5.5) { 
                 $type = 'High Entropy (Obfuscated)';
-                $desc = "File PHP ukuran besar (>100KB) dengan entropy tinggi ($ent). Kemungkinan malware ter-encode.";
+                $desc = "File PHP besar dengan entropy tinggi ($ent). Kemungkinan malware ter-encode.";
             }
         }
-        // 8. Deteksi Empty Shell
         elseif ($size === 0 && in_array($ext, array('php','phtml'))) { 
-            $type = 'Empty Shell'; $desc = 'File 0-byte. Backdoor gagal upload atau cache corrupt.'; 
+            $type = 'Empty Shell'; $desc = 'File 0-byte. Backdoor gagal upload.';
         }
         
+        // 3. Keyword Judi/Porno
         $found_kw = array();
         if (is_string($c)) {
             foreach ($illegal_kw as $k) { if (stripos($c, $k) !== false) $found_kw[] = $k; }
         }
         if ($found_kw) { 
-            if($type === '') { $type = 'Illegal Content'; $desc = 'Konten judi/porno/ilegal terdeteksi.'; }
+            if($type === '') { $type = 'Illegal Content'; $desc = 'Konten judi/porno/ilegal.'; }
             $desc .= ' Keyword: ' . implode(', ', $found_kw); 
         }
         
-        // 9. Atribusi Owner
+        // 4. Atribusi Owner
         if ($type !== '') {
             $mal_users[$owner_name] = true;
             $desc .= " (Owner: $owner_name)";
@@ -335,7 +352,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             $global_blacklist = @json_decode(@file_get_contents(GH_STATE_DIR . '/gh_blacklist.json'), true);
             if (is_array($global_blacklist) && isset($global_blacklist[$owner_name])) {
                 $type = 'Suspicious (Attributed)';
-                $desc = "File ini bersih, TAPI di-upload oleh user '$owner_name' yang sebelumnya ketahuan meng-upload backdoor. Hati-hati!";
+                $desc = "File ini bersih, TAPI di-upload oleh user '$owner_name' yang sebelumnya ketahuan meng-upload backdoor.";
                 $res['files'][] = array('path' => $path, 'type' => $type, 'desc' => $desc, 'owner' => $owner_name);
             }
         }
