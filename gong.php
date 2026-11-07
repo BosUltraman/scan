@@ -1,8 +1,8 @@
 <?php
 // language: PHP 7.4-8.3, file: gong.php, target: PHP-FPM/Apache mod_php
-// GHOST v18 - section 0..6: Advanced DB Parser, Implant Detection, File Attribution.
+// GHOST v18 - Heuristic v2: Large File Scanner & Obfuscation Detector.
 
-define('GH_VER',      '18.0.0-sultan');
+define('GH_VER',      '18.0.0-v2');
 define('GH_TAG',      'gong');
 define('GH_STATE_DIR', gh_state_dir());
 define('GH_LOG_FILE',   GH_STATE_DIR . '/gh_log_' . md5(__FILE__) . '.log');
@@ -187,6 +187,26 @@ function gh_read($path, $max = 5242880) {
     return null;
 }
 
+function gh_read_chunk($path, $chunk_size = 2097152) {
+    // Baca file besar secara aman (max 20MB) potongan per 2MB
+    if (!@is_file($path)) return null;
+    $sz = @filesize($path);
+    if ($sz === false || $sz > 20971520) return null; // Skip >20MB
+    
+    $h = @fopen($path, 'rb');
+    if (!$h) return null;
+    $out = '';
+    $read = 0;
+    while (!@feof($h) && $read < 20971520) {
+        $chunk = @fread($h, $chunk_size);
+        if ($chunk === false) break;
+        $out .= $chunk;
+        $read += strlen($chunk);
+    }
+    @fclose($h);
+    return $out;
+}
+
 function gh_write($path, $data, $append = false) {
     if (!is_string($path) || $path === '' || !is_string($data)) return false;
     $flags = $append ? (FILE_APPEND | LOCK_EX) : LOCK_EX;
@@ -202,7 +222,19 @@ function gh_del($path) {
     $r = gh_exec_adv('rm -f ' . @escapeshellarg($path)); return (is_array($r) && array_key_exists('out', $r) && $r['tier'] !== null);
 }
 
-// ==== SECTION 3: SCANNER (DEEP + ATTRIBUTION) ===============================
+// ==== SECTION 3: SCANNER (HEURISTIC V2) =====================================
+function gh_calc_entropy($data) {
+    if (!is_string($data) || $data === '') return 0;
+    $len = strlen($data);
+    $freq = array_count_values(str_split($data));
+    $ent = 0;
+    foreach ($freq as $count) {
+        $p = $count / $len;
+        $ent -= $p * log($p, 2);
+    }
+    return $ent;
+}
+
 function gh_scan_batch($root, $offset = 0, $limit = 50) {
     $res = array('files' => array(), 'done' => false, 'total' => 0);
     $all_files = array(); $stack = array($root);
@@ -215,7 +247,7 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             $path = $current . '/' . $f;
             if (@is_dir($path) && !@is_link($path)) { $stack[] = $path; }
             elseif (@is_file($path)) {
-                if (@filesize($path) > 5 * 1024 * 1024) continue;
+                if (@filesize($path) > 20 * 1024 * 1024) continue; // Max 20MB
                 $all_files[] = $path;
             }
         }
@@ -225,42 +257,64 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
     $res['total'] = count($all_files);
     
     $illegal_kw = array('slot','gacor','togel','judi','maxwin','bokep','porno','xxx','scam','phising','penipuan','pinjol','slot88','toto','bandar','sbobet');
-    
-    // Attribution Map: Catat user yang bikin file bahaya
     $mal_users = array();
 
     foreach ($batch as $path) {
-        $c = gh_read($path, 1048576);
+        // Baca potongan
+        $c = gh_read_chunk($path, 2097152);
         $size = @filesize($path);
+        $filename = basename($path);
         $ext = @strtolower(pathinfo($path, PATHINFO_EXTENSION));
         $findings = array(); $type = ''; $desc = '';
         
-        // Cek Owner File (Attribution Logic)
         $owner = @posix_getpwuid(@fileowner($path));
         $owner_name = is_array($owner) ? $owner['name'] : 'unknown';
         
-        // 1. Cek Implant Auth (seperti implant.php)
-        $is_implant = false;
-        if (is_string($c)) {
-            if (preg_match('/HTTP_X_AUTH/i', $c) || preg_match('/hex2bin\(/i', $c) && preg_match('/hash_equals/i', $c)) {
-                $is_implant = true;
+        // 1. Deteksi Leftover Dropper
+        if (preg_match('/^\.vnt_[a-f0-9]+\.php$|^\.vnt_/i', $filename)) {
+            $type = 'Leftover Dropper (Sampah)';
+            $desc = 'File sisa dari exploit/backdoor yang gagal. AMAN UNTUK DIHAPUS.';
+        }
+        // 2. Deteksi Implant Auth
+        elseif (is_string($c) && (preg_match('/HTTP_X_AUTH/i', $c) || (preg_match('/hex2bin\(/i', $c) && preg_match('/hash_equals/i', $c)))) {
+            $type = 'Implant Auth Bypass'; 
+            $desc = 'Script ini punya sistem login rahasia (X-Auth/Hex). Backdoor tingkat lanjut.';
+        }
+        // 3. Deteksi Obfuscation & RCE
+        elseif (is_string($c) && (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false || preg_match('/preg_replace\s*\(.*\/e/i', $c))) { 
+            $type = 'Obfuscated RCE'; $desc = 'Menggunakan eval()/assert()/preg_replace e-modifier untuk eksekusi kode dinamis.'; 
+        }
+        elseif (is_string($c) && preg_match('/(shell_exec|passthru|system|popen|proc_open|pcntl_exec)\s*\(\s*\$_/i', $c)) { 
+            $type = 'Direct Webshell'; $desc = 'Mengeksekusi shell dari parameter HTTP secara langsung.'; 
+        }
+        elseif (is_string($c) && preg_match('/(`.*?`)/s', $c) && (stripos($c, '$_') !== false)) {
+            $type = 'Backtick Exec'; $desc = 'Mengeksekusi perintah via backtick (`) dari input user.';
+        }
+        // 4. Deteksi String Splitting & Base64
+        elseif (is_string($c) && (stripos($c, 'base64_decode') !== false || stripos($c, 'gzinflate') !== false || stripos($c, 'str_rot13') !== false) && (stripos($c, 'eval') !== false || stripos($c, 'system') !== false)) {
+            $type = 'Encoded Payload'; $desc = 'Payload disembunyikan pakai base64/gzip/rot13 sebelum dieksekusi.';
+        }
+        // 5. Deteksi Hidden PHP
+        elseif (!$ext && is_string($c) && stripos($c, '<?php') !== false) {
+            $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi tapi berisi kode PHP.';
+        }
+        // 6. Deteksi Polyglot
+        elseif (in_array($ext, array('jpg','jpeg','png','gif')) && is_string($c) && stripos($c, '<?php') !== false) {
+            $type = 'Polyglot Malware'; $desc = 'Gambar yang disisipi kode PHP (Bypass upload).';
+        }
+        // 7. Deteksi Entropy Tinggi (File Besar & Acak)
+        elseif ($size > 102400 && is_string($c) && $ext === 'php') {
+            // Ambil 100KB pertama buat cek entropy
+            $sample = substr($c, 0, 102400);
+            $ent = gh_calc_entropy($sample);
+            if ($ent > 5.5) { // 5.5 adalah ambang batas normal
+                $type = 'High Entropy (Obfuscated)';
+                $desc = "File PHP ukuran besar (>100KB) dengan entropy tinggi ($ent). Kemungkinan malware ter-encode.";
             }
         }
-
-        // 2. Deteksi Tipe
-        if ($is_implant) {
-            $type = 'Implant Auth Bypass'; 
-            $desc = 'Script ini punya sistem login rahasia (X-Auth/Hex). Ini backdoor tingkat lanjut.';
-        } elseif ($size === 0 && in_array($ext, array('php','phtml'))) { 
-            $type = 'Empty Shell'; $desc = 'File 0-byte (Backdoor gagal upload).'; 
-        } elseif (is_string($c) && (stripos($c, 'eval(') !== false || stripos($c, 'assert(') !== false)) { 
-            $type = 'Obfuscated RCE'; $desc = 'Menggunakan eval()/assert() untuk mengeksekusi kode dinamis.'; 
-        } elseif (is_string($c) && preg_match('/(shell_exec|passthru|system|popen)\s*\(\s*\$_/', $c)) { 
-            $type = 'Direct Webshell'; $desc = 'Mengeksekusi shell dari parameter HTTP secara langsung.'; 
-        } elseif (in_array($ext, array('jpg','jpeg','png','gif')) && is_string($c) && stripos($c, '<?php') !== false) {
-            $type = 'Polyglot Malware'; $desc = 'Gambar yang disisipi kode PHP (Bypass upload).';
-        } elseif (!$ext && is_string($c) && stripos($c, '<?php') !== false) {
-            $type = 'Hidden PHP'; $desc = 'File tanpa ekstensi tapi berisi kode PHP.';
+        // 8. Deteksi Empty Shell
+        elseif ($size === 0 && in_array($ext, array('php','phtml'))) { 
+            $type = 'Empty Shell'; $desc = 'File 0-byte. Backdoor gagal upload atau cache corrupt.'; 
         }
         
         $found_kw = array();
@@ -272,15 +326,12 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
             $desc .= ' Keyword: ' . implode(', ', $found_kw); 
         }
         
-        // 3. Logika Atribusi (Owner)
+        // 9. Atribusi Owner
         if ($type !== '') {
-            $mal_users[$owner_name] = true; // Tandai user ini sebagai pembuat malware
+            $mal_users[$owner_name] = true;
             $desc .= " (Owner: $owner_name)";
             $res['files'][] = array('path' => $path, 'type' => $type, 'desc' => $desc, 'owner' => $owner_name);
         } else {
-            // Kalau file bersih, tapi owner-nya ada di daftar hitam, tandai sebagai 'Suspicious'
-            // (Karena user ini pernah upload backdoor)
-            // Kita cek dulu apakah owner ini ada di daftar blacklist global
             $global_blacklist = @json_decode(@file_get_contents(GH_STATE_DIR . '/gh_blacklist.json'), true);
             if (is_array($global_blacklist) && isset($global_blacklist[$owner_name])) {
                 $type = 'Suspicious (Attributed)';
@@ -290,7 +341,6 @@ function gh_scan_batch($root, $offset = 0, $limit = 50) {
         }
     }
     
-    // Simpan user pembuat malware ke blacklist global
     if (!empty($mal_users)) {
         $bl_file = GH_STATE_DIR . '/gh_blacklist.json';
         $bl = @json_decode(@file_get_contents($bl_file), true);
@@ -807,7 +857,7 @@ function renderScan(mal) {
     let h = `<table><tr><th>Type & Desc</th><th>File</th><th>Aksi</th></tr>`;
     mal.forEach(x => {
         let enc = encodeURIComponent(x.path);
-        let badge_color = x.type.includes('Suspicious') ? '#f0ad4e' : '#d9534f';
+        let badge_color = x.type.includes('Suspicious') ? '#f0ad4e' : (x.type.includes('Leftover') ? '#5bc0de' : '#d9534f');
         h += `<tr>
             <td><span class="badge" style="background:${badge_color}">${esc(x.type)}</span><br><span class="dim" style="font-size:11px;">${esc(x.desc)}</span></td>
             <td>${esc(x.path)}</td>
